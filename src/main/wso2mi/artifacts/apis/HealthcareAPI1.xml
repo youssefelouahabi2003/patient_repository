@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<api xmlns="http://ws.apache.org/ns/synapse"
+     name="MI_PATIENT"
+     context="/patients">
+
+    <resource methods="GET" uri-template="/">
+        <inSequence>
+            <payloadFactory media-type="json">
+                <format>
+                    {
+                        "patients": [
+                            {
+                                "id": 1,
+                                "name": "Juan Pérez",
+                                "age": 45,
+                                "diagnosis": "Diabetes"
+                            },
+                            {
+                                "id": 2,
+                                "name": "María López",
+                                "age": 32,
+                                "diagnosis": "Hipertensión"
+                            },
+                            {
+                                "id": 3,
+                                "name": "Carlos Gómez",
+                                "age": 60,
+                                "diagnosis": "Asma"
+                            },
+                            {
+                                "id": 4,
+                                "name": "Ana Martínez",
+                                "age": 27,
+                                "diagnosis": "Migraña"
+                            }
+                        ]
+                    }
+                </format>
+                <args/>
+            </payloadFactory>
+
+            <respond/>
+        </inSequence>
+
+        <outSequence/>
+        <faultSequence/>
+    </resource>
+
+</api>
