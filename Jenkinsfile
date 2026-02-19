@@ -1,8 +1,8 @@
 pipeline {
-  agent any   // si usas un nodo Windows concreto: agent { label 'windows' }
+  agent any   // o agent { label 'windows' } si tu agente es Windows con etiqueta
 
   tools {
-    jdk   'JDK17'    // deben existir en "Administrar Jenkins -> Configuración global de herramientas"
+    jdk   'JDK17'    // Deben existir en "Administrar Jenkins -> Configuración global de herramientas"
     maven 'Maven3'
   }
 
@@ -12,15 +12,15 @@ pipeline {
 
   options {
     timestamps()
-    ansiColor('xterm')
     timeout(time: 45, unit: 'MINUTES')
     buildDiscarder(logRotator(numToKeepStr: '20'))
+    disableConcurrentBuilds()
   }
 
   stages {
     stage('Checkout') {
       steps {
-        // cambia 'main' por 'master' si tu rama principal es master
+        // Cambia 'main' por 'master' si tu rama principal es master
         git branch: 'main', url: 'https://github.com/youssefelouahabi2003/patient_repository.git'
       }
     }
@@ -61,7 +61,7 @@ pipeline {
       }
     }
 
-    // (Opcional) Comprobación rápida del endpoint
+    // (Opcional) comprobación rápida del endpoint
     stage('Comprobación HTTP (opcional)') {
       when { expression { return true } }  // pon false si no quieres comprobar
       steps {
