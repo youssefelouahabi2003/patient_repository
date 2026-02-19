@@ -43,23 +43,28 @@ pipeline {
       }
     }
 
-    stage('Copiar a Micro Integrator') {
-      steps {
-        bat '''
-          @echo off
-          if not exist "%MI_DEST%" mkdir "%MI_DEST%"
-          rem Copiamos los .car y controlamos el exit code de robocopy
-          robocopy "%WORKSPACE%\\target" "%MI_DEST%" *.car /NFL /NDL /NJH /NJS /COPY:DAT
-          set RC=%ERRORLEVEL%
-          echo robocopy rc=%RC%
-          if %RC% GEQ 8 (
-            echo ERROR: robocopy devolvió %RC%
-            exit /b 1
-          )
-          echo CAR copiado a: %MI_DEST%
-        '''
-      }
-    }
+  stage('Copiar a Micro Integrator') {
+  steps {
+    bat '''
+      @echo off
+      if not exist "%MI_DEST%" mkdir "%MI_DEST%"
+
+      robocopy "%WORKSPACE%\\target" "%MI_DEST%" *.car /NFL /NDL /NJH /NJS /COPY:DAT
+      set RC=%ERRORLEVEL%
+      echo robocopy rc=%RC%
+
+      rem Robocopy: 0..7 = OK / informativo; 8+ = error
+      if %RC% GEQ 8 (
+        echo ERROR: robocopy devolvio %RC%
+        exit /b 1
+      )
+
+      echo CAR copiado a: %MI_DEST%
+      exit /b 0
+    '''
+  }
+}
+
 
     // (Opcional) comprobación rápida del endpoint
     stage('Comprobación HTTP (opcional)') {
