@@ -47,58 +47,62 @@ pipeline {
       }
     }
 
-    stage('Desplegar en Micro Integrator por API (sin auth)') {
+    stage('Desplegar en Micro Integrator por API (Basic Auth)') {
   steps {
-    bat """
-      @echo off
-      setlocal enabledelayedexpansion
+    withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
+      bat """
+        @echo off
+        setlocal enabledelayedexpansion
 
-      set "MI_HOST=${params.MI_HOST}"
-      set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
+        set "MI_HOST=${params.MI_HOST}"
+        set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
 
-      if "%MI_HOST%"=="" (
-        echo ERROR: MI_HOST vacio
-        exit /b 1
-      )
-      if "%MI_MGMT_PORT%"=="" (
-        echo ERROR: MI_MGMT_PORT vacio
-        exit /b 1
-      )
-
-      set "ENDPOINT=https://%MI_HOST%:%MI_MGMT_PORT%/management/applications"
-
-      echo ------------------------------------------
-      echo Subiendo .car a Micro Integrator por API
-      echo Endpoint: %ENDPOINT%
-      echo ------------------------------------------
-
-      for %%F in ("%WORKSPACE%\\target\\*.car") do (
-        echo Subiendo: %%~nxF
-
-        if "${params.MI_TLS_INSEGURO}"=="true" (
-          curl -k -f -sS -X POST "%ENDPOINT%" ^
-            -H "Accept: application/json" ^
-            -F "file=@%%F" ^
-            -w "\\nHTTP_STATUS=%{http_code}\\n"
-        ) else (
-          curl -f -sS -X POST "%ENDPOINT%" ^
-            -H "Accept: application/json" ^
-            -F "file=@%%F" ^
-            -w "\\nHTTP_STATUS=%{http_code}\\n"
+        if "%MI_HOST%"=="" (
+          echo ERROR: MI_HOST vacio
+          exit /b 1
         )
-
-        if errorlevel 1 (
-          echo ERROR: curl fallo subiendo %%~nxF
+        if "%MI_MGMT_PORT%"=="" (
+          echo ERROR: MI_MGMT_PORT vacio
           exit /b 1
         )
 
-        echo OK: %%~nxF subido
-        echo.
-      )
+        set "ENDPOINT=https://%MI_HOST%:%MI_MGMT_PORT%/management/applications"
 
-      echo Despliegue por API completado.
-      exit /b 0
-    """
+        echo ------------------------------------------
+        echo Subiendo .car a Micro Integrator por API (Basic Auth)
+        echo Endpoint: %ENDPOINT%
+        echo ------------------------------------------
+
+        for %%F in ("%WORKSPACE%\\target\\*.car") do (
+          echo Subiendo: %%~nxF
+
+          if "${params.MI_TLS_INSEGURO}"=="true" (
+            curl -k -f -sS -X POST "%ENDPOINT%" ^
+              -u "%MI_USER%:%MI_PASS%" ^
+              -H "Accept: application/json" ^
+              -F "file=@%%F" ^
+              -w "\\nHTTP_STATUS=%%{http_code}\\n"
+          ) else (
+            curl -f -sS -X POST "%ENDPOINT%" ^
+              -u "%MI_USER%:%MI_PASS%" ^
+              -H "Accept: application/json" ^
+              -F "file=@%%F" ^
+              -w "\\nHTTP_STATUS=%%{http_code}\\n"
+          )
+
+          if errorlevel 1 (
+            echo ERROR: curl fallo subiendo %%~nxF
+            exit /b 1
+          )
+
+          echo OK: %%~nxF subido
+          echo.
+        )
+
+        echo Despliegue por API completado.
+        exit /b 0
+      """
+    }
   }
 }
 
