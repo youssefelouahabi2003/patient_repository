@@ -23,6 +23,7 @@ pipeline {
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         git branch: 'main', url: 'https://github.com/youssefelouahabi2003/patient_repository.git'
@@ -38,98 +39,96 @@ pipeline {
     stage('Verificar .car') {
       steps {
         script {
-          def listado = bat(returnStdout: true, script: 'if exist target\\*.car (dir /B target\\*.car) else (echo __NO_CAR__)').trim()
+          def listado = bat(
+            returnStdout: true,
+            script: 'if exist target\\*.car (dir /B target\\*.car) else (echo __NO_CAR__)'
+          ).trim()
+
           if (listado == '__NO_CAR__') {
             error 'No se generó ningún .car en target\\'
           }
+
           echo "CAR(s) encontrados:\n${listado}"
         }
       }
     }
 
-    stage('Desplegar en Micro Integrator por API (login JWT + upload)') {
-  steps {
-    bat """
-      @echo off
-      setlocal enabledelayedexpansion
+    stage('Desplegar en Micro Integrator por API') {
+      steps {
+        bat """
+          @echo off
 
-      set "MI_HOST=${params.MI_HOST}"
-      set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
+          set "MI_HOST=${params.MI_HOST}"
+          set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
+          set "MI_USER=jenkins"
+          set "MI_PASS=Jenkins1234!"
 
-      set "MI_USER=jenkins"
-      set "MI_PASS=Jenkins1234!"
+          if "%MI_HOST%"=="" (
+            echo ERROR: MI_HOST vacio
+            exit /b 1
+          )
 
-      if "%MI_HOST%"=="" (
-        echo ERROR: MI_HOST vacio
-        exit /b 1
-      )
-      if "%MI_MGMT_PORT%"=="" (
-        echo ERROR: MI_MGMT_PORT vacio
-        exit /b 1
-      )
+          set "BASE=https://%MI_HOST%:%MI_MGMT_PORT%/management"
+          set "LOGIN=%BASE%/login"
+          set "APPS=%BASE%/applications"
 
-      set "BASE=https://%MI_HOST%:%MI_MGMT_PORT%/management"
-      set "LOGIN=%BASE%/login"
-      set "APPS=%BASE%/applications"
+          echo ==========================================
+          echo 1) LOGIN - Obtener JWT
+          echo ==========================================
 
-      echo ------------------------------------------
-      echo 1) Login para obtener JWT
-      echo LOGIN: %LOGIN%
-      echo ------------------------------------------
+          if "${params.MI_TLS_INSEGURO}"=="true" (
+            curl -k -v -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "HTTP_STATUS=%%{http_code}"
+          ) else (
+            curl -v -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "HTTP_STATUS=%%{http_code}"
+          )
 
-      rem 1) Obtener JWT (AccessToken)
-      if "${params.MI_TLS_INSEGURO}"=="true" (
-        curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json
-      ) else (
-        curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json
-      )
+          echo.
+          echo Respuesta login:
+          type login.json
+          echo.
 
-      type login.json
+          for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set TOKEN=%%T
 
-      rem 2) Extraer AccessToken (sin jq, con powershell)
-      for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command ^
-        "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set "TOKEN=%%T"
+          if "%TOKEN%"=="" (
+            echo ERROR: No se pudo obtener token.
+            exit /b 1
+          )
 
-      if "%TOKEN%"=="" (
-        echo ERROR: No se pudo obtener token. Revisa usuario/pass o config de MI.
-        exit /b 1
-      )
+          echo Token obtenido correctamente.
+          echo ==========================================
+          echo 2) SUBIR CAR
+          echo ==========================================
 
-      echo Token obtenido (oculto).
+          for %%F in ("%WORKSPACE%\\target\\*.car") do (
+            echo Subiendo: %%~nxF
 
-      echo ------------------------------------------
-      echo 2) Subir .car usando Bearer token
-      echo APPS: %APPS%
-      echo ------------------------------------------
+            if "${params.MI_TLS_INSEGURO}"=="true" (
+              curl -k -v -X POST "%APPS%" ^
+                -H "Authorization: Bearer %TOKEN%" ^
+                -H "Accept: application/json" ^
+                -F "file=@%%F" ^
+                -w "HTTP_STATUS=%%{http_code}"
+            ) else (
+              curl -v -X POST "%APPS%" ^
+                -H "Authorization: Bearer %TOKEN%" ^
+                -H "Accept: application/json" ^
+                -F "file=@%%F" ^
+                -w "HTTP_STATUS=%%{http_code}"
+            )
 
-      for %%F in ("%WORKSPACE%\\target\\*.car") do (
-        echo Subiendo: %%~nxF
+            if errorlevel 1 (
+              echo ERROR subiendo %%~nxF
+              exit /b 1
+            )
+          )
 
-        if "${params.MI_TLS_INSEGURO}"=="true" (
-          curl -k -f -sS -X POST "%APPS%" ^
-            -H "Authorization: Bearer %TOKEN%" ^
-            -H "Accept: application/json" ^
-            -F "file=@%%F" ^
-            -w "\\nHTTP_STATUS=%%{http_code}\\n"
-        ) else (
-          curl -f -sS -X POST "%APPS%" ^
-            -H "Authorization: Bearer %TOKEN%" ^
-            -H "Accept: application/json" ^
-            -F "file=@%%F" ^
-            -w "\\nHTTP_STATUS=%%{http_code}\\n"
-        )
-
-        if errorlevel 1 (
-          echo ERROR: fallo subiendo %%~nxF
-          exit /b 1
-        )
-      )
-
-      echo Despliegue por API completado.
-      exit /b 0
-    """
-  }
-}
+          echo ==========================================
+          echo DESPLIEGUE COMPLETADO
+          echo ==========================================
+          exit /b 0
+        """
+      }
+    }
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
@@ -145,7 +144,8 @@ pipeline {
           for (int i=1; i<=intentos; i++) {
             try {
               bat(returnStdout: true, script: "powershell -NoProfile -Command \"(Invoke-WebRequest -UseBasicParsing -Uri '${url}' -TimeoutSec 8).StatusCode\"")
-              ok = true; break
+              ok = true
+              break
             } catch (e) {
               echo "Intento ${i}/${intentos}: aún no responde ${url}. Esperamos 5s..."
               sleep 5
