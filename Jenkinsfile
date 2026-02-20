@@ -48,54 +48,59 @@ pipeline {
     }
 
     stage('Desplegar en Micro Integrator por API (sin auth)') {
-      steps {
-        // Inyectamos params dentro del bat para evitar "https://:/..."
-        bat """
-          @echo off
-          setlocal enabledelayedexpansion
+  steps {
+    bat """
+      @echo off
+      setlocal enabledelayedexpansion
 
-          set "MI_HOST=${params.MI_HOST}"
-          set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
+      set "MI_HOST=${params.MI_HOST}"
+      set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
 
-          if "%MI_HOST%"=="" (
-            echo ERROR: MI_HOST vacio
-            exit /b 1
-          )
-          if "%MI_MGMT_PORT%"=="" (
-            echo ERROR: MI_MGMT_PORT vacio
-            exit /b 1
-          )
+      if "%MI_HOST%"=="" (
+        echo ERROR: MI_HOST vacio
+        exit /b 1
+      )
+      if "%MI_MGMT_PORT%"=="" (
+        echo ERROR: MI_MGMT_PORT vacio
+        exit /b 1
+      )
 
-          set "ENDPOINT=https://%MI_HOST%:%MI_MGMT_PORT%/management/applications"
+      set "ENDPOINT=https://%MI_HOST%:%MI_MGMT_PORT%/management/applications"
 
-          echo ------------------------------------------
-          echo Subiendo .car a Micro Integrator por API (sin auth)
-          echo Endpoint: %ENDPOINT%
-          echo ------------------------------------------
+      echo ------------------------------------------
+      echo Subiendo .car a Micro Integrator por API
+      echo Endpoint: %ENDPOINT%
+      echo ------------------------------------------
 
-          for %%F in ("%WORKSPACE%\\target\\*.car") do (
-            echo Subiendo: %%~nxF
+      for %%F in ("%WORKSPACE%\\target\\*.car") do (
+        echo Subiendo: %%~nxF
 
-            if "${params.MI_TLS_INSEGURO}"=="true" (
-              curl -k -s -X POST "%ENDPOINT%" -F "file=@%%F"
-            ) else (
-              curl -s -X POST "%ENDPOINT%" -F "file=@%%F"
-            )
+        if "${params.MI_TLS_INSEGURO}"=="true" (
+          curl -k -f -sS -X POST "%ENDPOINT%" ^
+            -H "Accept: application/json" ^
+            -F "file=@%%F" ^
+            -w "\\nHTTP_STATUS=%{http_code}\\n"
+        ) else (
+          curl -f -sS -X POST "%ENDPOINT%" ^
+            -H "Accept: application/json" ^
+            -F "file=@%%F" ^
+            -w "\\nHTTP_STATUS=%{http_code}\\n"
+        )
 
-            if errorlevel 1 (
-              echo ERROR: fallo subiendo %%~nxF
-              exit /b 1
-            )
+        if errorlevel 1 (
+          echo ERROR: curl fallo subiendo %%~nxF
+          exit /b 1
+        )
 
-            echo OK: %%~nxF subido
-            echo.
-          )
+        echo OK: %%~nxF subido
+        echo.
+      )
 
-          echo Despliegue por API completado.
-          exit /b 0
-        """
-      }
-    }
+      echo Despliegue por API completado.
+      exit /b 0
+    """
+  }
+}
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
