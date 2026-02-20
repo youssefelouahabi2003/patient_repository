@@ -47,71 +47,89 @@ pipeline {
       }
     }
 
-    stage('Desplegar en Micro Integrator por API (credenciales hardcodeadas)') {
-      steps {
-        bat """
-          @echo off
-          setlocal enabledelayedexpansion
+    stage('Desplegar en Micro Integrator por API (login JWT + upload)') {
+  steps {
+    bat """
+      @echo off
+      setlocal enabledelayedexpansion
 
-          rem ====== CREDENCIALES A PELO (SOLO PARA PRUEBA) ======
-          set "MI_USER=jenkins"
-          set "MI_PASS=Jenkins1234!"
-          rem Ejemplo alternativo:
-          rem set "MI_USER=jenkins"
-          rem set "MI_PASS=Jenkins1234!"
-          rem =====================================================
+      set "MI_HOST=${params.MI_HOST}"
+      set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
 
-          set "MI_HOST=${params.MI_HOST}"
-          set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
+      set "MI_USER=jenkins"
+      set "MI_PASS=Jenkins1234!"
 
-          if "%MI_HOST%"=="" (
-            echo ERROR: MI_HOST vacio
-            exit /b 1
-          )
-          if "%MI_MGMT_PORT%"=="" (
-            echo ERROR: MI_MGMT_PORT vacio
-            exit /b 1
-          )
+      if "%MI_HOST%"=="" (
+        echo ERROR: MI_HOST vacio
+        exit /b 1
+      )
+      if "%MI_MGMT_PORT%"=="" (
+        echo ERROR: MI_MGMT_PORT vacio
+        exit /b 1
+      )
 
-          set "ENDPOINT=https://%MI_HOST%:%MI_MGMT_PORT%/management/applications"
+      set "BASE=https://%MI_HOST%:%MI_MGMT_PORT%/management"
+      set "LOGIN=%BASE%/login"
+      set "APPS=%BASE%/applications"
 
-          echo ------------------------------------------
-          echo Subiendo .car a MI por API (Basic Auth)
-          echo Endpoint: %ENDPOINT%
-          echo Usuario: %MI_USER%
-          echo ------------------------------------------
+      echo ------------------------------------------
+      echo 1) Login para obtener JWT
+      echo LOGIN: %LOGIN%
+      echo ------------------------------------------
 
-          for %%F in ("%WORKSPACE%\\target\\*.car") do (
-            echo Subiendo: %%~nxF
+      rem 1) Obtener JWT (AccessToken)
+      if "${params.MI_TLS_INSEGURO}"=="true" (
+        curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json
+      ) else (
+        curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json
+      )
 
-            if "${params.MI_TLS_INSEGURO}"=="true" (
-              curl -k -f -sS -X POST "%ENDPOINT%" ^
-                -u "%MI_USER%:%MI_PASS%" ^
-                -H "Accept: application/json" ^
-                -F "file=@%%F" ^
-                -w "\\nHTTP_STATUS=%%{http_code}\\n"
-            ) else (
-              curl -f -sS -X POST "%ENDPOINT%" ^
-                -u "%MI_USER%:%MI_PASS%" ^
-                -H "Accept: application/json" ^
-                -F "file=@%%F" ^
-                -w "\\nHTTP_STATUS=%%{http_code}\\n"
-            )
+      type login.json
 
-            if errorlevel 1 (
-              echo ERROR: curl fallo subiendo %%~nxF
-              exit /b 1
-            )
+      rem 2) Extraer AccessToken (sin jq, con powershell)
+      for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command ^
+        "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set "TOKEN=%%T"
 
-            echo OK: %%~nxF subido
-            echo.
-          )
+      if "%TOKEN%"=="" (
+        echo ERROR: No se pudo obtener token. Revisa usuario/pass o config de MI.
+        exit /b 1
+      )
 
-          echo Despliegue por API completado.
-          exit /b 0
-        """
-      }
-    }
+      echo Token obtenido (oculto).
+
+      echo ------------------------------------------
+      echo 2) Subir .car usando Bearer token
+      echo APPS: %APPS%
+      echo ------------------------------------------
+
+      for %%F in ("%WORKSPACE%\\target\\*.car") do (
+        echo Subiendo: %%~nxF
+
+        if "${params.MI_TLS_INSEGURO}"=="true" (
+          curl -k -f -sS -X POST "%APPS%" ^
+            -H "Authorization: Bearer %TOKEN%" ^
+            -H "Accept: application/json" ^
+            -F "file=@%%F" ^
+            -w "\\nHTTP_STATUS=%%{http_code}\\n"
+        ) else (
+          curl -f -sS -X POST "%APPS%" ^
+            -H "Authorization: Bearer %TOKEN%" ^
+            -H "Accept: application/json" ^
+            -F "file=@%%F" ^
+            -w "\\nHTTP_STATUS=%%{http_code}\\n"
+        )
+
+        if errorlevel 1 (
+          echo ERROR: fallo subiendo %%~nxF
+          exit /b 1
+        )
+      )
+
+      echo Despliegue por API completado.
+      exit /b 0
+    """
+  }
+}
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
