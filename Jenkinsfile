@@ -50,21 +50,17 @@ pipeline {
     stage('Desplegar en Micro Integrator por API (Basic Auth)') {
   steps {
     withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
-      bat """
-        @echo off
-        setlocal enabledelayedexpansion
-
-        set "MI_HOST=${params.MI_HOST}"
-        set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
-
-        if "%MI_HOST%"=="" (
-          echo ERROR: MI_HOST vacio
-          exit /b 1
-        )
-        if "%MI_MGMT_PORT%"=="" (
-          echo ERROR: MI_MGMT_PORT vacio
-          exit /b 1
-        )
+  bat """
+    set "ENDPOINT=https://${params.MI_HOST}:${params.MI_MGMT_PORT}/management/applications"
+    for %%F in ("%WORKSPACE%\\target\\*.car") do (
+      curl -k -f -sS -X POST "%ENDPOINT%" ^
+        -u "%MI_USER%:%MI_PASS%" ^
+        -F "file=@%%F" ^
+        -w "\\nHTTP_STATUS=%%{http_code}\\n"
+      if errorlevel 1 exit /b 1
+    )
+    exit /b 0
+  
 
         set "ENDPOINT=https://%MI_HOST%:%MI_MGMT_PORT%/management/applications"
 
