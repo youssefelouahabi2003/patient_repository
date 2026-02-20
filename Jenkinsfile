@@ -54,8 +54,8 @@ pipeline {
           setlocal enabledelayedexpansion
 
           rem ====== CREDENCIALES A PELO (SOLO PARA PRUEBA) ======
-          set "MI_USER=admin"
-          set "MI_PASS=admin"
+          set "MI_USER=jenkins"
+          set "MI_PASS=Jenkins1234!"
           rem Ejemplo alternativo:
           rem set "MI_USER=jenkins"
           rem set "MI_PASS=Jenkins1234!"
