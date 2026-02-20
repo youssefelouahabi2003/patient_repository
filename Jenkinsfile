@@ -1,13 +1,18 @@
 pipeline {
-  agent any   // o agent { label 'windows' } si tu agente es Windows con etiqueta
+  agent any
 
   tools {
-    jdk   'JDK17'    // Deben existir en "Administrar Jenkins -> Configuración global de herramientas"
+    jdk   'JDK17'
     maven 'Maven3'
   }
 
-  environment {
-    MI_DEST = 'C:\\opt\\micro-integrator\\wso2mi-4.3.0.21\\wso2mi-4.3.0\\repository\\deployment\\server\\carbonapps'
+  parameters {
+    string(name: 'MI_HOST', defaultValue: 'localhost', description: 'Host o IP donde está Micro Integrator')
+    string(name: 'MI_MGMT_PORT', defaultValue: '9164', description: 'Puerto de Management API de MI')
+    booleanParam(name: 'MI_TLS_INSEGURO', defaultValue: true, description: 'Aceptar certificado TLS no confiable (dev)')
+    booleanParam(name: 'COMPROBAR_HTTP', defaultValue: true, description: 'Comprobar endpoint HTTP tras desplegar')
+    string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI')
+    string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue')
   }
 
   options {
@@ -43,48 +48,70 @@ pipeline {
       }
     }
 
-  stage('Copiar a Micro Integrator') {
-  steps {
-    bat '''
-      @echo off
-      if not exist "%MI_DEST%" mkdir "%MI_DEST%"
+    stage('Desplegar en Micro Integrator por API (sin auth)') {
+      steps {
+        bat '''
+          @echo off
+          setlocal enabledelayedexpansion
 
-      robocopy "%WORKSPACE%\\target" "%MI_DEST%" *.car /NFL /NDL /NJH /NJS /COPY:DAT
-      set RC=%ERRORLEVEL%
-      echo robocopy rc=%RC%
+          set "MI_URL=https://%MI_HOST%:%MI_MGMT_PORT%"
+          set "ENDPOINT=%MI_URL%/management/applications"
 
-      rem Robocopy: 0..7 = OK / informativo; 8+ = error
-      if %RC% GEQ 8 (
-        echo ERROR: robocopy devolvio %RC%
-        exit /b 1
-      )
+          echo ------------------------------------------
+          echo Subiendo .car a Micro Integrator por API (sin auth)
+          echo Endpoint: %ENDPOINT%
+          echo ------------------------------------------
 
-      echo CAR copiado a: %MI_DEST%
-      exit /b 0
-    '''
-  }
-}
+          for %%F in ("%WORKSPACE%\\target\\*.car") do (
+            echo Subiendo: %%~nxF
 
+            if "%MI_TLS_INSEGURO%"=="true" (
+              curl -k -s -X POST "%ENDPOINT%" -F "file=@%%F"
+            ) else (
+              curl -s -X POST "%ENDPOINT%" -F "file=@%%F"
+            )
 
-    // (Opcional) comprobación rápida del endpoint
+            if errorlevel 1 (
+              echo ERROR: fallo subiendo %%~nxF
+              exit /b 1
+            )
+
+            echo OK: %%~nxF subido
+            echo.
+          )
+
+          echo Despliegue por API completado.
+          exit /b 0
+        '''
+      }
+    }
     stage('Comprobación HTTP (opcional)') {
-      when { expression { return true } }  // pon false si no quieres comprobar
+      when { expression { return params.COMPROBAR_HTTP } }
       steps {
         echo 'Esperando 3s a que MI procese el .car...'
         sleep 3
+
         script {
           def intentos = 6
           def ok = false
-          for (int i=1; i<=intentos; i++) {
+          def url = "http://${params.MI_HOST}:${params.MI_RUNTIME_PORT}${params.HEALTH_PATH}"
+
+          for (int i = 1; i <= intentos; i++) {
             try {
-              bat(returnStdout: true, script: 'powershell -NoProfile -Command "(Invoke-WebRequest -UseBasicParsing -Uri \\"http://localhost:8290/patients/\\" -TimeoutSec 5).StatusCode"')
-              ok = true; break
+              bat(returnStdout: true, script: "powershell -NoProfile -Command \"(Invoke-WebRequest -UseBasicParsing -Uri '${url}' -TimeoutSec 5).StatusCode\"")
+              ok = true
+              break
             } catch (e) {
-              echo "Intento ${i}/${intentos}: aún no responde. Esperamos 5s..."
+              echo "Intento ${i}/${intentos}: aún no responde ${url}. Esperamos 5s..."
               sleep 5
             }
           }
-          if (!ok) error 'El endpoint no respondió en el tiempo esperado.'
+
+          if (!ok) {
+            error "El endpoint no respondió en el tiempo esperado: ${url}"
+          } else {
+            echo "OK: el endpoint respondió: ${url}"
+          }
         }
       }
     }
