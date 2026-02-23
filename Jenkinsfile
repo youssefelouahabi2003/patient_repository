@@ -170,7 +170,7 @@ pipeline {
             set "APIM_PORT=%APIM_PORT%"
             set "APIM_USER=%APIM_USER%"
             set "APIM_PASS=%APIM_PASS%"
-            set "OAS_FILE=%WORKSPACE%\src\main\wso2mi\resources\api-definitions\HealthcareAPI1.yaml"
+            set """OAS_FILE=%WORKSPACE%\src\main\wso2mi\resources\api-definitions\HealthcareAPI1.yaml"""
             set "API_NAME=%API_NAME%"
             set "API_VERSION=%API_VERSION%"
 
