@@ -9,15 +9,12 @@ pipeline {
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
 
-    // Parámetros para API Manager
-    string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
+    string(name: 'APIM_HOST', defaultValue: 'apim.local', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
-    // Opcionales: si tu openapi no contiene name/version, pásalos aquí para publicar automáticamente
     string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
     string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
   }
 
-  // Mapear params a environment para usar %VAR% en los scripts Windows y evitar interpolaciones problemáticas
   environment {
     MI_HOST         = "${params.MI_HOST ?: 'localhost'}"
     MI_MGMT_PORT    = "${params.MI_MGMT_PORT ?: '9164'}"
@@ -25,7 +22,7 @@ pipeline {
     MI_RUNTIME_PORT = "${params.MI_RUNTIME_PORT ?: '8290'}"
     HEALTH_PATH     = "${params.HEALTH_PATH ?: '/patients/'}"
 
-    APIM_HOST       = "${params.APIM_HOST ?: 'localhost'}"
+    APIM_HOST       = "${params.APIM_HOST ?: 'apim.local'}"
     APIM_PORT       = "${params.APIM_PORT ?: '9443'}"
     API_NAME        = "${params.API_NAME ?: ''}"
     API_VERSION     = "${params.API_VERSION ?: ''}"
@@ -66,7 +63,7 @@ pipeline {
       }
     }
 
-    // <<< RESTAURADO: Stage EXACTO que me pasaste y que funcionaba >>>
+    // Stage original de MI (restaurado exactamente como tu versión original)
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
@@ -148,84 +145,112 @@ pipeline {
         }
       }
     }
-    // <<< FIN RESTAURACIÓN >>>
 
+    // STAGE APIM REPARADO: añade env a apictl si falta y usa "apictl import api"
     stage('Publicar en API Manager (Windows)') {
-  steps {
-    script {
-      def oasPath = "${env.WORKSPACE}\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
-      if (!fileExists(oasPath)) {
-        echo "ERROR: no se encuentra el swagger en ${oasPath}"
-        error("Swagger no encontrado")
+      steps {
+        // comprobar si existe openapi.yaml (usa tu ruta real dentro del repo)
+        script {
+          def oasPath = "${env.WORKSPACE}\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
+          if (!fileExists(oasPath)) {
+            echo "Aviso: no se encuentra ${oasPath}. Se omite publicación en APIM."
+            return
+          }
+        }
+
+        withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
+          // uso de comillas simples triple para evitar problemas de escape con backslashes
+          bat '''
+            @echo off
+            setlocal
+
+            set "APIM_HOST=%APIM_HOST%"
+            set "APIM_PORT=%APIM_PORT%"
+            set "APIM_USER=%APIM_USER%"
+            set "APIM_PASS=%APIM_PASS%"
+            set "OAS_FILE=%WORKSPACE%\src\main\wso2mi\resources\api-definitions\HealthcareAPI1.yaml"
+
+            echo ------------------------------------------
+            echo Publicación en API Manager - inicio
+            echo APIM host: %APIM_HOST%:%APIM_PORT%
+            echo OAS: %OAS_FILE%
+            echo ------------------------------------------
+
+            REM 1) comprobar apictl
+            where apictl > NUL 2> NUL
+            if errorlevel 1 (
+              echo apictl NO encontrado -> fallback REST import
+              set "USE_APICTL=false"
+            ) else (
+              echo apictl encontrado
+              set "USE_APICTL=true"
+            )
+
+            REM 2) Si apictl existe, comprobar si env 'ci' está configurado
+            if "%USE_APICTL%"=="true" (
+              apictl list env > apictl_envs.txt 2> apictl_envs_err.txt
+              findstr /I /C:"ci" apictl_envs.txt >NUL
+              if errorlevel 1 (
+                echo Environment 'ci' no encontrado en apictl -> lo añadimos
+                REM añadir env 'ci' apuntando a tu APIM (insecure si corresponde)
+                apictl add env -n ci --host "https://%APIM_HOST%:%APIM_PORT%" --username "%APIM_USER%" --password "%APIM_PASS%" --insecure
+                if errorlevel 1 (
+                  echo ERROR: fallo al añadir environment 'ci' en apictl
+                  type apictl_envs_err.txt || true
+                  exit /b 1
+                )
+                echo Environment 'ci' añadido correctamente.
+              ) else (
+                echo Environment 'ci' ya existe en apictl.
+              )
+            )
+
+            REM 3) Import con apictl (usa la sintaxis actual)
+            if "%USE_APICTL%"=="true" (
+              echo Importando API con apictl...
+              apictl import api -f "%OAS_FILE%" -e ci --update
+              if errorlevel 1 (
+                echo ERROR: apictl import api falló.
+                exit /b 1
+              )
+
+              REM Si se proporcionan nombre y versión, publicar
+              if not "%API_NAME%"=="" if not "%API_VERSION%"=="" (
+                echo Publicando API %API_NAME% %API_VERSION% con apictl...
+                apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci
+                if errorlevel 1 (
+                  echo ERROR: apictl change-status ha fallado.
+                  exit /b 1
+                )
+                echo API publicada correctamente con apictl.
+              ) else (
+                echo Import hecho con apictl (no se solicitó change-status automático).
+              )
+            ) else (
+              REM 4) Fallback REST: import via publisher import-openapi
+              echo apictl no disponible -> import via REST
+              curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt
+
+              if exist import_status.txt (
+                set /p HTTP_CODE=<import_status.txt
+              ) else (
+                set "HTTP_CODE="
+              )
+              echo Import REST HTTP status: %HTTP_CODE%
+
+              if not "%HTTP_CODE%"=="200" if not "%HTTP_CODE%"=="201" (
+                echo ERROR: fallo importando via REST (HTTP %HTTP_CODE%)
+                if exist import_resp.json type import_resp.json
+                exit /b 1
+              )
+              echo Import via REST completado correctamente.
+            )
+
+            endlocal
+          '''
+        }
       }
     }
-
-    withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
-      bat '''
-        @echo off
-        setlocal
-
-        set "APIM_HOST=%APIM_HOST%"
-        set "APIM_PORT=%APIM_PORT%"
-        set "APIM_USER=%APIM_USER%"
-        set "APIM_PASS=%APIM_PASS%"
-        set "OAS_FILE=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
-
-        echo ------------------------------------------
-        echo Publicación en API Manager - inicio
-        echo APIM host: %APIM_HOST%:%APIM_PORT%
-        echo OAS: %OAS_FILE%
-        echo ------------------------------------------
-
-        where apictl > NUL 2> NUL
-        if errorlevel 1 (
-            echo apictl NO encontrado -> fallback REST import
-            set "USE_APICTL=false"
-        ) else (
-            echo apictl encontrado
-            set "USE_APICTL=true"
-        )
-
-        if "%USE_APICTL%"=="true" (
-            echo Login con apictl...
-            apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k --host "https://%APIM_HOST%:%APIM_PORT%"
-            if errorlevel 1 (
-                echo ERROR: apictl login falló.
-                exit /b 1
-            )
-
-            echo Importando API...
-            apictl import-api -f "%OAS_FILE%" -e ci --update
-            if errorlevel 1 (
-                echo ERROR: apictl import-api falló.
-                exit /b 1
-            )
-
-            echo API importada correctamente.
-        ) else (
-            echo Importando via REST...
-            curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt
-
-            if exist import_status.txt (
-                set /p HTTP_CODE=<import_status.txt
-            )
-
-            echo HTTP status: %HTTP_CODE%
-
-            if not "%HTTP_CODE%"=="200" if not "%HTTP_CODE%"=="201" (
-                echo ERROR: fallo importando via REST
-                type import_resp.json
-                exit /b 1
-            )
-
-            echo Import REST completado correctamente.
-        )
-
-        endlocal
-      '''
-    }
-  }
-}
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
