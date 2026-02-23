@@ -13,11 +13,11 @@ pipeline {
     string(name: 'APIM_HOST', defaultValue: 'apim.local', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
     // Opcionales: si tu openapi no contiene name/version, pásalos aquí para publicar automáticamente
-    string(name: 'API_NAME', defaultValue: 'PepeApi', description: 'Nombre de la API (opcional para publish automático)', trim: true)
-    string(name: 'API_VERSION', defaultValue: '1.0.0', description: 'Versión de la API (opcional para publish automático)', trim: true)
+    string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
+    string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
   }
 
-  // Mapear params a environment para usar %VAR% en los scripts Windows y evitar interpolaciones
+  // Mapear params a environment para usar %VAR% en los scripts Windows y evitar interpolaciones problemáticas
   environment {
     MI_HOST         = "${params.MI_HOST ?: 'localhost'}"
     MI_MGMT_PORT    = "${params.MI_MGMT_PORT ?: '9164'}"
@@ -66,14 +66,15 @@ pipeline {
       }
     }
 
+    // <<< RESTAURADO: Stage EXACTO que me pasaste y que funcionaba >>>
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
           bat """
             @echo off
             REM -- asignar vars --
-            set "MI_HOST=%MI_HOST%"
-            set "MI_MGMT_PORT=%MI_MGMT_PORT%"
+            set "MI_HOST=${params.MI_HOST}"
+            set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
             set "MI_USER=%MI_USER%"
             set "MI_PASS=%MI_PASS%"
 
@@ -95,31 +96,20 @@ pipeline {
             echo LOGIN: %LOGIN%
             echo ------------------------------------------
 
-            rem Obtener JWT (AccessToken). En Windows es necesario escapar %% en write-out
-            if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+            rem Obtener JWT (AccessToken)
+            if "${params.MI_TLS_INSEGURO}"=="true" (
+              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
             ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
             )
 
-            if exist login_status.txt (
-              set /p HTTP_CODE=<login_status.txt
-            ) else (
-              set "HTTP_CODE="
-            )
-            echo Login HTTP status: %HTTP_CODE%
-            if exist login.json (
-              echo Contenido login.json (primeras 200 chars):
-              powershell -NoProfile -Command "Get-Content login.json -Raw | Out-String | Select-Object -First 1 | ForEach-Object { \$t = \$_; if (\$t.Length -gt 200) { \$t.Substring(0,200) + '...'} else { \$t } }"
-            )
+            type login.json
 
             rem Extraer AccessToken con PowerShell
             for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set "TOKEN=%%T"
 
             if "%TOKEN%"=="" (
               echo ERROR: No se pudo obtener token. Revisa usuario/pass o config de MI.
-              echo Mostrando login.json para debugging:
-              type login.json || echo "(login.json no existe)"
               exit /b 1
             )
 
@@ -132,31 +122,22 @@ pipeline {
             for %%F in ("%WORKSPACE%\\target\\*.car") do (
               echo Subiendo: %%~nxF
 
-              if "%MI_TLS_INSEGURO%"=="true" (
+              if "${params.MI_TLS_INSEGURO}"=="true" (
                 curl -k -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  --write-out "%%{http_code}" > upload_status.txt
+                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
               ) else (
                 curl -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  --write-out "%%{http_code}" > upload_status.txt
+                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
               )
 
-              if exist upload_status.txt (
-                set /p UP_HTTP=<upload_status.txt
-              ) else (
-                set "UP_HTTP="
-              )
-              echo Upload HTTP status: %UP_HTTP%
-
-              if not "%UP_HTTP%"=="200" if not "%UP_HTTP%"=="201" (
-                echo ERROR: fallo subiendo %%~nxF (HTTP %UP_HTTP%)
-                echo Mostrando respuesta de upload (si existe):
-                type upload_status.txt || echo "(no disponible)"
+              if errorlevel 1 (
+                echo ERROR: fallo subiendo %%~nxF
                 exit /b 1
               )
             )
@@ -167,6 +148,7 @@ pipeline {
         }
       }
     }
+    // <<< FIN RESTAURACIÓN >>>
 
     stage('Publicar en API Manager (Windows)') {
       steps {
