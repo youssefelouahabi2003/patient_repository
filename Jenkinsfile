@@ -40,7 +40,6 @@ pipeline {
     disableConcurrentBuilds()
     timeout(time: 60, unit: 'MINUTES')
     buildDiscarder(logRotator(daysToKeepStr: '30', numToKeepStr: '30'))
-    ansiColor('xterm')
   }
 
   stages {
@@ -54,7 +53,6 @@ pipeline {
     stage('Build (Maven)') {
       steps {
         echo "Ejecutando: mvn -B -DskipTests clean package"
-        // En Windows usas bat (si Jenkins ejecuta el agente Windows)
         bat 'mvn -B -DskipTests clean package'
       }
     }
@@ -78,7 +76,6 @@ pipeline {
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
-          // Uso de comillas simples para evitar interpolación Groovy; dentro uso %MI_HOST% etc.
           bat '''
             @echo off
             setlocal enabledelayedexpansion
@@ -163,7 +160,6 @@ pipeline {
     }
 
     stage('Publicar en API Manager (Windows)') {
-      // Ejecuta siempre si existe openapi.yaml, si no, falla con mensaje claro
       when { expression { return true } }
       steps {
         withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
@@ -189,7 +185,6 @@ pipeline {
             where apictl >nul 2>nul
             if %ERRORLEVEL%==0 (
               echo apictl encontrado -> uso apictl para import/update
-              REM Login con apictl (profile 'ci' usado como ejemplo)
               apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k --host "https://%APIM_HOST%:%APIM_PORT%"
               if %ERRORLEVEL% neq 0 (
                 echo ERROR: apictl login falló
@@ -203,7 +198,6 @@ pipeline {
                 exit /b 1
               )
 
-              REM Si se pasan API_NAME y API_VERSION, intentamos publicar (change-status)
               if not "%API_NAME%"=="" if not "%API_VERSION%"=="" (
                 echo Publicando API %API_NAME% %API_VERSION% ...
                 apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci
@@ -219,10 +213,8 @@ pipeline {
             ) else (
               echo apictl NO encontrado -> fallback REST import
 
-              REM Import via REST (publisher import-openapi). Requiere autenticación básica.
               curl -k -s -o import_resp.json -w "HTTP_STATUS=%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt
 
-              REM Extraer HTTP_STATUS desde import_status.txt
               set /p HTTP_CODE=<import_status.txt
               echo Import REST HTTP status: %HTTP_CODE%
 
