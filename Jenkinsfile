@@ -38,7 +38,6 @@ pipeline {
 
     stage('Verificar .car') {
       steps {
-        // Versión robusta para Windows: evita paréntesis en echo dentro de un if-block
         bat """
           @echo off
           REM Buscamos archivos .car en target\
@@ -183,26 +182,20 @@ pipeline {
           echo API_ID = %API_ID%
 
           echo ==========================================
-          echo 3) Publicar API (Change Lifecycle)
+          echo 3) Publicar API (Change Lifecycle) via curl
           echo ==========================================
 
-          powershell -NoProfile -Command ^
-            "$body = @{ action='Publish'; apiId='%API_ID%'; lifecycleChecklist=@() } | ConvertTo-Json -Compress; ^
-             Invoke-RestMethod -Method Post ^
-               -Uri 'https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/change-lifecycle' ^
-               -Body $body ^
-               -ContentType 'application/json' ^
-               -Credential (New-Object System.Management.Automation.PSCredential('admin',(ConvertTo-SecureString 'admin' -AsPlainText -Force))) ^
-               -SkipCertificateCheck"
+          rem Usamos curl para evitar problemas de $ en Groovy GString
+          for /f "usebackq delims=" %%R in (`curl -k -s -o change_resp.json -w "%%{http_code}" -u "admin:admin" -H "Content-Type: application/json" -d "{\"action\":\"Publish\",\"apiId\":\"%API_ID%\",\"lifecycleChecklist\":[]}" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/change-lifecycle"`) do set "HTTP_CODE=%%R"
 
-          if errorlevel 1 (
-            echo ERROR: Fallo al publicar la API
+          echo Change lifecycle HTTP code: %HTTP_CODE%
+          if NOT "%HTTP_CODE:~0,1%"=="2" (
+            echo ERROR: Fallo al publicar la API. Response:
+            type change_resp.json || true
             exit /b 1
           )
 
-          echo ==========================================
-          echo API IMPORTADA Y PUBLICADA CORRECTAMENTE
-          echo ==========================================
+          echo API importada y publicada correctamente.
         """
       }
     }
