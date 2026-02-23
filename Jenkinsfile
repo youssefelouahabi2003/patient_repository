@@ -12,7 +12,6 @@ pipeline {
     string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
 
-    // Opcional: si tu openapi no tiene title/version en info, puedes pasarlos.
     string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
     string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
   }
@@ -33,19 +32,22 @@ pipeline {
 
     stage('Build (Maven)') {
       steps {
-        // Asume Maven y JDK ya disponibles en el agente Windows
         bat 'mvn -B -DskipTests clean package'
       }
     }
 
     stage('Verificar .car') {
       steps {
+        // Versión robusta para Windows: evita paréntesis en echo dentro de un if-block
         bat """
           @echo off
-          if exist target\\*.car (
-            echo CAR(s) encontrados:
-            dir /B target\\*.car
-          ) else (
+          REM Buscamos archivos .car en target\
+          set "FOUND=0"
+          for %%F in (target\\*.car) do (
+            set "FOUND=1"
+            echo Found CAR: %%~nxF
+          )
+          if "%FOUND%"=="0" (
             echo ERROR: No se generó ningún .car en target\\
             exit /b 1
           )
@@ -58,7 +60,6 @@ pipeline {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
           bat """
             @echo off
-            REM -- asignar vars --
             set "MI_HOST=${params.MI_HOST}"
             set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
             set "MI_USER=%MI_USER%"
