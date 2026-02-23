@@ -1,7 +1,6 @@
 pipeline {
   agent any
 
-  // Parámetros de ejecución
   parameters {
     string(name: 'MI_HOST', defaultValue: 'localhost', description: 'Host o IP donde está Micro Integrator', trim: true)
     string(name: 'MI_MGMT_PORT', defaultValue: '9164', description: 'Puerto Management API de MI', trim: true)
@@ -13,26 +12,21 @@ pipeline {
     string(name: 'APIM_HOST', defaultValue: 'apim.local', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
 
-    // Opcionales: si tu openapi no contiene name/version, pásalos aquí para publicar automáticamente
     string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
     string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
   }
 
-  // Mapeo seguro de params a environment para usar en los scripts Windows (%VAR%)
   environment {
-    MI_HOST       = "${params.MI_HOST ?: 'localhost'}"
-    MI_MGMT_PORT  = "${params.MI_MGMT_PORT ?: '9164'}"
-    // Convertir boolean -> texto ("true"/"false") para uso cómodo en batch
+    MI_HOST         = "${params.MI_HOST ?: 'localhost'}"
+    MI_MGMT_PORT    = "${params.MI_MGMT_PORT ?: '9164'}"
     MI_TLS_INSEGURO = "${params.MI_TLS_INSEGURO}"
     MI_RUNTIME_PORT = "${params.MI_RUNTIME_PORT ?: '8290'}"
     HEALTH_PATH     = "${params.HEALTH_PATH ?: '/patients/'}"
 
-    APIM_HOST     = "${params.APIM_HOST ?: 'apim.local'}"
-    APIM_PORT     = "${params.APIM_PORT ?: '9443'}"
-    API_NAME      = "${params.API_NAME ?: ''}"
-    API_VERSION   = "${params.API_VERSION ?: ''}"
-
-    // WORKSPACE ya está disponible en el entorno de Jenkins
+    APIM_HOST       = "${params.APIM_HOST ?: 'apim.local'}"
+    APIM_PORT       = "${params.APIM_PORT ?: '9443'}"
+    API_NAME        = "${params.API_NAME ?: ''}"
+    API_VERSION     = "${params.API_VERSION ?: ''}"
   }
 
   options {
@@ -80,7 +74,7 @@ pipeline {
             @echo off
             setlocal enabledelayedexpansion
 
-            REM -- asignar vars desde entorno de Jenkins --
+            REM variables desde Jenkins
             set "MI_HOST=%MI_HOST%"
             set "MI_MGMT_PORT=%MI_MGMT_PORT%"
             set "MI_USER=%MI_USER%"
@@ -105,23 +99,35 @@ pipeline {
             echo LOGIN: %LOGIN%
             echo ------------------------------------------
 
-            REM Obtener JWT (AccessToken)
+            REM Nota: en Windows cmd hay que escapar el % de curl --write-out usando %%
+            REM Guardamos cuerpo y HTTP status en ficheros separados
             if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
+              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
             ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
+              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
             )
 
-            type login.json
+            REM Leer código HTTP
+            set /p HTTP_CODE=<login_status.txt
+            echo Login HTTP status: %HTTP_CODE%
+
+            if "%HTTP_CODE%" neq "200" (
+              echo ERROR: login a MI falló (HTTP %HTTP_CODE%).
+              echo Contenido de login.json:
+              type login.json || true
+              exit /b 1
+            )
 
             REM Extraer AccessToken con PowerShell (o con jq si disponible)
             for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set "TOKEN=%%T"
 
             if "%TOKEN%"=="" (
-              echo ERROR: No se pudo obtener token. Revisa usuario/pass o config de MI.
+              echo ERROR: No se pudo obtener token desde login.json. Mostrar login.json para debugging:
+              type login.json || true
               exit /b 1
             )
 
+            REM ocultar token para no imprimirlo en logs
             echo Token obtenido (oculto).
             echo ------------------------------------------
             echo 2) Subir .car usando Bearer token
@@ -136,19 +142,23 @@ pipeline {
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  -w "\\nHTTP_STATUS=%{http_code}\\n"
+                  --write-out "%%{http_code}" > upload_status.txt
               ) else (
                 curl -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  -w "\\nHTTP_STATUS=%{http_code}\\n"
+                  --write-out "%%{http_code}" > upload_status.txt
               )
 
-              if errorlevel 1 (
-                echo ERROR: fallo subiendo %%~nxF
+              set /p UP_HTTP=<upload_status.txt
+              echo Upload HTTP status: %UP_HTTP%
+
+              if not "%UP_HTTP%"=="200" if not "%UP_HTTP%"=="201" (
+                echo ERROR: fallo subiendo %%~nxF (HTTP %UP_HTTP%)
                 exit /b 1
               )
+
             )
 
             echo Despliegue por API completado.
@@ -167,7 +177,6 @@ pipeline {
             @echo off
             setlocal enabledelayedexpansion
 
-            REM Variables desde Jenkins environment
             set "APIM_HOST=%APIM_HOST%"
             set "APIM_PORT=%APIM_PORT%"
             set "APIM_USER=%APIM_USER%"
@@ -212,9 +221,7 @@ pipeline {
 
             ) else (
               echo apictl NO encontrado -> fallback REST import
-
-              curl -k -s -o import_resp.json -w "HTTP_STATUS=%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt
-
+              curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt
               set /p HTTP_CODE=<import_status.txt
               echo Import REST HTTP status: %HTTP_CODE%
 
@@ -224,8 +231,7 @@ pipeline {
                 type import_resp.json || true
                 exit /b 1
               )
-
-              echo Import via REST completado. Nota: publish/lifecycle puede necesitar un cambio adicional via Product/Lifecycle APIs.
+              echo Import via REST completado.
             )
 
             endlocal
