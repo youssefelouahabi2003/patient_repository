@@ -8,6 +8,13 @@ pipeline {
     booleanParam(name: 'COMPROBAR_HTTP', defaultValue: false, description: 'Comprobar endpoint runtime tras desplegar')
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
+
+    string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
+    string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
+
+    // Opcional: si tu openapi no tiene title/version en info, puedes pasarlos.
+    string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
+    string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
   }
 
   options {
@@ -26,7 +33,7 @@ pipeline {
 
     stage('Build (Maven)') {
       steps {
-        // Asume que Maven y JDK están instalados en el agente Windows
+        // Asume Maven y JDK ya disponibles en el agente Windows
         bat 'mvn -B -DskipTests clean package'
       }
     }
@@ -36,6 +43,7 @@ pipeline {
         bat """
           @echo off
           if exist target\\*.car (
+            echo CAR(s) encontrados:
             dir /B target\\*.car
           ) else (
             echo ERROR: No se generó ningún .car en target\\
@@ -50,7 +58,7 @@ pipeline {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
           bat """
             @echo off
-
+            REM -- asignar vars --
             set "MI_HOST=${params.MI_HOST}"
             set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
             set "MI_USER=%MI_USER%"
@@ -124,6 +132,77 @@ pipeline {
             exit /b 0
           """
         }
+      }
+    }
+
+    stage('Publicar API en API Manager (Windows - REST, admin:admin)') {
+      steps {
+        bat """
+          @echo off
+
+          set "APIM_HOST=${params.APIM_HOST}"
+          set "APIM_PORT=${params.APIM_PORT}"
+          set "OAS_FILE=%WORKSPACE%\\openapi.yaml"
+
+          if not exist "%OAS_FILE%" (
+            echo ERROR: No se encuentra openapi.yaml
+            exit /b 1
+          )
+
+          echo ==========================================
+          echo 1) Importar OpenAPI en Publisher
+          echo ==========================================
+
+          curl -k -s -u "admin:admin" ^
+            -F "file=@%OAS_FILE%" ^
+            "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi?preserveProvider=false" ^
+            -o import_response.json
+
+          if errorlevel 1 (
+            echo ERROR: Fallo al importar la API
+            type import_response.json
+            exit /b 1
+          )
+
+          echo Respuesta import:
+          type import_response.json
+
+          echo ==========================================
+          echo 2) Extraer API ID
+          echo ==========================================
+
+          for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command ^
+            "(Get-Content import_response.json -Raw | ConvertFrom-Json).id"`) do set "API_ID=%%A"
+
+          if "%API_ID%"=="" (
+            echo ERROR: No se pudo obtener API_ID
+            exit /b 1
+          )
+
+          echo API_ID = %API_ID%
+
+          echo ==========================================
+          echo 3) Publicar API (Change Lifecycle)
+          echo ==========================================
+
+          powershell -NoProfile -Command ^
+            "$body = @{ action='Publish'; apiId='%API_ID%'; lifecycleChecklist=@() } | ConvertTo-Json -Compress; ^
+             Invoke-RestMethod -Method Post ^
+               -Uri 'https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/change-lifecycle' ^
+               -Body $body ^
+               -ContentType 'application/json' ^
+               -Credential (New-Object System.Management.Automation.PSCredential('admin',(ConvertTo-SecureString 'admin' -AsPlainText -Force))) ^
+               -SkipCertificateCheck"
+
+          if errorlevel 1 (
+            echo ERROR: Fallo al publicar la API
+            exit /b 1
+          )
+
+          echo ==========================================
+          echo API IMPORTADA Y PUBLICADA CORRECTAMENTE
+          echo ==========================================
+        """
       }
     }
 
