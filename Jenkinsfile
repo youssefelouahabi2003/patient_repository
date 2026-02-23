@@ -54,20 +54,20 @@ pipeline {
       }
     }
 
-    stage('Verificar .car') {
-      steps {
-        bat '''
-          @echo off
-          if exist target\*.car (
-            echo CARs encontrados:
-            dir /B target\*.car
-          ) else (
-            echo ERROR: No se generó ningún .car en target\
-            exit /b 1
-          )
-        '''
-      }
-    }
+   stage('Verificar .car') {
+  steps {
+    bat '''
+      @echo off
+      if exist target\\*.car (
+        echo CARs encontrados:
+        dir /B target\\*.car
+      ) else (
+        echo ERROR: No se generó ningún .car en target\\
+        exit /b 1
+      )
+    '''
+  }
+}
 
     // ===== Stage Despliegue en Micro Integrator: SIN TOCAR la lógica funcional =====
     stage('Desplegar en Micro Integrator (Windows)') {
