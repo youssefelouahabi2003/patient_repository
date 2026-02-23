@@ -67,9 +67,52 @@ pipeline {
       }
     }
 
+    stage('Diagnostic Mi Connectivity') {
+      steps {
+        echo "Verificaciones de conectividad y cabeceras para el endpoint de Management"
+        bat '''
+          @echo off
+          setlocal
+
+          set "MI_HOST=%MI_HOST%"
+          set "MI_MGMT_PORT=%MI_MGMT_PORT%"
+          set "LOGIN_URL=https://%MI_HOST%:%MI_MGMT_PORT%/management/login"
+
+          echo -------------------------------------------------------
+          echo 0) Resolución DNS y reachability
+          echo -------------------------------------------------------
+          REM Comprobar resolución DNS (nslookup) y ping (si responde)
+          nslookup %MI_HOST% > dns_lookup.txt 2>&1 || echo "nslookup fallo"
+          echo ==== dns_lookup.txt ====
+          type dns_lookup.txt || true
+
+          echo -------------------------------------------------------
+          echo 1) Test-NetConnection (puerto TCP) desde PowerShell
+          echo -------------------------------------------------------
+          powershell -NoProfile -Command "try { Test-NetConnection -ComputerName '%MI_HOST%' -Port %MI_MGMT_PORT% | Out-File -Encoding ascii testnetconn.txt } catch { 'PS_FAILED' | Out-File -Encoding ascii testnetconn.txt }"
+          echo ==== testnetconn.txt ====
+          type testnetconn.txt || true
+
+          echo -------------------------------------------------------
+          echo 2) HEAD request (curl -I) y guardar headers
+          echo -------------------------------------------------------
+          if "%MI_TLS_INSEGURO%"=="true" (
+            curl -k -sS -D login_headers.txt -I "%LOGIN_URL%" -o /dev/null || echo "curl HEAD fallo"
+          ) else (
+            curl -sS -D login_headers.txt -I "%LOGIN_URL%" -o /dev/null || echo "curl HEAD fallo"
+          )
+          echo ==== login_headers.txt ====
+          type login_headers.txt || true
+
+          endlocal
+        '''
+      }
+    }
+
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
+          // bat con diagnóstico paso a paso y dumps para debugging
           bat '''
             @echo off
             setlocal enabledelayedexpansion
@@ -94,39 +137,69 @@ pipeline {
             set "LOGIN=%BASE%/login"
             set "APPS=%BASE%/applications"
 
-            echo ------------------------------------------
+            echo -------------------------------------------------------
             echo 1) Intentando login (Basic Auth) para obtener JWT
             echo LOGIN: %LOGIN%
-            echo ------------------------------------------
+            echo -------------------------------------------------------
 
-            REM Intento 1: Basic Auth. Guardamos cuerpo y HTTP status.
+            REM Limpiar ficheros previos
+            del /q login.json login_status.txt login_debug.txt login_headers.txt token.txt 2>nul || true
+
+            REM ---- intento 1: Basic Auth (verbose) ----
+            echo [DEBUG] Intento BasicAuth (curl -v). stdout->login.json stderr->login_debug.txt, HTTP->login_status.txt
             if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             )
 
             set /p HTTP_CODE=<login_status.txt
             echo Login HTTP status: %HTTP_CODE%
+            echo ==== login_debug.txt (stderr curl verbose) ====
+            type login_debug.txt || true
 
+            REM Guardar headers también para inspección (HEAD request)
+            if "%MI_TLS_INSEGURO%"=="true" (
+              curl -k -sS -D login_headers.txt -I "%LOGIN%" -o /dev/null || echo "curl HEAD fallo" > login_headers.txt
+            ) else (
+              curl -sS -D login_headers.txt -I "%LOGIN%" -o /dev/null || echo "curl HEAD fallo" > login_headers.txt
+            )
+            echo ==== login_headers.txt ====
+            type login_headers.txt || true
+
+            REM Si 200 -> parse token, si 401 -> intentar POST JSON
             if "%HTTP_CODE%"=="200" goto :parse_token
-
             echo NOT 200. Intentaremos POST JSON (si BasicAuth no funciona). (HTTP %HTTP_CODE%)
 
-            REM Intento 2: POST JSON con username/password (algunas versiones/configs requieren body JSON)
+            REM ---- intento 2: POST JSON (verbose) ----
+            echo [DEBUG] Intento POST JSON (curl -v)
             if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+              curl -k -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             ) else (
-              curl -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+              curl -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             )
 
             set /p HTTP_CODE=<login_status.txt
             echo Login POST JSON HTTP status: %HTTP_CODE%
+            echo ==== login_debug.txt (stderr curl verbose) ====
+            type login_debug.txt || true
 
             if not "%HTTP_CODE%"=="200" (
               echo ERROR: login a MI falló tras ambos intentos (HTTP %HTTP_CODE%).
-              echo Contenido de login.json para debugging:
+              echo ==== login.json (respuesta) ====
               type login.json || true
+
+              REM chequeo rápido si la respuesta es HTML (form/login page)
+              findstr /i "<html" login.json > nul 2>nul && echo Nota: la respuesta parece ser HTML (posible página de login) || echo Nota: la respuesta no parece HTML.
+
+              echo -------------------------------------------------------
+              echo CHECKLIST SUGERIDO:
+              echo  - Credenciales MI_ADMIN correctas en Jenkins?
+              echo  - Endpoint correcto para login? (version/endpoint diferente?)
+              echo  - TLS: si usas certificados reales, desactiva MI_TLS_INSEGURO=false y prueba con certificado correcto
+              echo  - Revisa logs del Micro Integrator para trace del intent login
+              echo -------------------------------------------------------
+
               exit /b 1
             )
 
@@ -137,7 +210,7 @@ pipeline {
 
             if %ERRORLEVEL% neq 0 (
               echo ERROR: No se pudo parsear login.json para extraer AccessToken.
-              echo Contenido de login.json:
+              echo ==== login.json ====
               type login.json || true
               exit /b 1
             )
@@ -149,11 +222,12 @@ pipeline {
               exit /b 1
             )
 
+            REM ocultar token para no imprimirlo en logs
             echo Token obtenido (oculto).
-            echo ------------------------------------------
+            echo -------------------------------------------------------
             echo 2) Subir .car usando Bearer token
             echo APPS: %APPS%
-            echo ------------------------------------------
+            echo -------------------------------------------------------
 
             for %%F in ("%WORKSPACE%\\target\\*.car") do (
               echo Subiendo: %%~nxF
@@ -163,21 +237,24 @@ pipeline {
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  --write-out "%%{http_code}" > upload_status.txt
+                  --write-out "%%{http_code}" > upload_status.txt 2>upload_debug.txt
               ) else (
                 curl -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  --write-out "%%{http_code}" > upload_status.txt
+                  --write-out "%%{http_code}" > upload_status.txt 2>upload_debug.txt
               )
 
               set /p UP_HTTP=<upload_status.txt
               echo Upload HTTP status: %UP_HTTP%
+              echo ==== upload_debug.txt ====
+              type upload_debug.txt || true
 
               if not "%UP_HTTP%"=="200" if not "%UP_HTTP%"=="201" (
                 echo ERROR: fallo subiendo %%~nxF (HTTP %UP_HTTP%)
-                type import_resp.json || true
+                echo ==== upload_debug.txt ====
+                type upload_debug.txt || true
                 exit /b 1
               )
             )
