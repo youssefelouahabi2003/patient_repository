@@ -9,7 +9,7 @@ pipeline {
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
 
-    // APIM: por defecto localhost (tal y como pediste)
+    // APIM: por defecto localhost
     string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
 
@@ -69,7 +69,7 @@ pipeline {
       }
     }
 
-    // ==== Stage MI: restaurado exactamente como tu versión original ====
+    // Stage MI (sin tocar, como pediste)
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
@@ -152,11 +152,10 @@ pipeline {
       }
     }
 
-    // ==== Stage APIM: escribe y ejecuta apim_deploy.cmd para evitar problemas de parsing ====
+    // Stage APIM: escribimos script .cmd (CORREGIDO) y lo ejecutamos
     stage('Publicar en API Manager (Windows)') {
       steps {
         script {
-          // ruta del swagger dentro del repo (ajusta si tu fichero tiene otro nombre)
           def oasRelative = 'src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml'
           def oasPath = "${env.WORKSPACE}\\${oasRelative}"
           if (!fileExists(oasPath)) {
@@ -164,7 +163,7 @@ pipeline {
             return
           }
 
-          // contenido del script .cmd que se escribirá en workspace
+          // Script corregido: % {http_code} (simple %), ifs anidados, echos debug
           def scriptContent = '''
 @echo off
 setlocal
@@ -193,13 +192,19 @@ if errorlevel 1 (
   set "USE_APICTL=1"
 )
 
+echo [DEBUG] USE_APICTL=%USE_APICTL%
+
 rem 2) si apictl disponible -> comprobar/añadir env 'ci' y luego importar
 if "%USE_APICTL%"=="1" (
-  echo Listando envs en apictl...
+  echo [DEBUG] list envs
   apictl list env > apictl_envs.txt 2>apictl_envs_err.txt
+  echo [DEBUG] contenido apictl_envs.txt:
+  if exist apictl_envs.txt type apictl_envs.txt
+
   findstr /I /C:"ci" apictl_envs.txt >NUL
   if errorlevel 1 (
     echo Environment 'ci' no encontrado en apictl -> añadiendo...
+    echo [DEBUG] apictl add env ci --apim "https://%APIM_HOST%:%APIM_PORT%" --username "%APIM_USER%" --password "*****" --insecure
     apictl add env ci --apim "https://%APIM_HOST%:%APIM_PORT%" --username "%APIM_USER%" --password "%APIM_PASS%" --insecure > apictl_add_env_out.txt 2> apictl_add_env_err.txt
     if errorlevel 1 (
       echo ERROR: fallo al añadir environment 'ci' en apictl.
@@ -211,7 +216,7 @@ if "%USE_APICTL%"=="1" (
     echo Environment 'ci' ya existe en apictl.
   )
 
-  echo Importando API con apictl...
+  echo [DEBUG] ahora import
   apictl import api -f "%OAS_FILE%" -e ci --update > apictl_import_out.txt 2> apictl_import_err.txt
   if errorlevel 1 (
     echo ERROR: apictl import api falló.
@@ -219,23 +224,28 @@ if "%USE_APICTL%"=="1" (
     exit /b 1
   )
 
-  rem publicar si se indica
-  if not "%API_NAME%"=="" if not "%API_VERSION%"=="" (
-    echo Publicando API %API_NAME% %API_VERSION% con apictl...
-    apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci > apictl_publish_out.txt 2>apictl_publish_err.txt
-    if errorlevel 1 (
-      echo ERROR: apictl change-status ha fallado.
-      if exist apictl_publish_err.txt type apictl_publish_err.txt
-      exit /b 1
+  rem publicar si se indica (ifs anidados seguros)
+  if not "%API_NAME%"=="" (
+    if not "%API_VERSION%"=="" (
+      echo Publicando API %API_NAME% %API_VERSION% con apictl...
+      apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci > apictl_publish_out.txt 2>apictl_publish_err.txt
+      if errorlevel 1 (
+        echo ERROR: apictl change-status ha fallado.
+        if exist apictl_publish_err.txt type apictl_publish_err.txt
+        exit /b 1
+      )
+      echo API publicada correctamente con apictl.
+    ) else (
+      echo API_VERSION no proporcionada; salto publish.
     )
-    echo API publicada correctamente con apictl.
   ) else (
-    echo Import hecho con apictl (no se solicitó change-status automático).
+    echo API_NAME no proporcionada; salto publish.
   )
 ) else (
   rem fallback REST: import via publisher import-openapi
   echo apictl no disponible -> import via REST
-  curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt 2> import_debug.txt
+  echo [DEBUG] curl -k -s -o import_resp.json --write-out "%{http_code}" -u "*****:*****" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi"
+  curl -k -s -o import_resp.json --write-out "%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt 2> import_debug.txt
 
   if exist import_status.txt (
     set /p HTTP_CODE=<import_status.txt
@@ -258,8 +268,8 @@ endlocal
           writeFile file: "${env.WORKSPACE}\\apim_deploy.cmd", text: scriptContent
         }
 
-        // ejecuta el script .cmd con las credenciales del APIM
         withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
+          // ejecuta el script que acabamos de crear
           bat "call \"%WORKSPACE%\\apim_deploy.cmd\""
         }
       }
