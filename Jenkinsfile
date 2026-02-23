@@ -9,7 +9,7 @@ pipeline {
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
 
-    // APIM: por defecto localhost
+    // APIM: por defecto localhost (tal y como pediste)
     string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
 
@@ -58,28 +58,29 @@ pipeline {
       steps {
         bat '''
           @echo off
-          if exist target\\*.car (
+          if exist target\*.car (
             echo CARs encontrados:
-            dir /B target\\*.car
+            dir /B target\*.car
           ) else (
-            echo ERROR: No se generó ningún .car en target\\
+            echo ERROR: No se generó ningún .car en target\
             exit /b 1
           )
         '''
       }
     }
 
-    // Stage MI (sin tocar)
+    // ===== Stage Despliegue en Micro Integrator: SIN TOCAR la lógica funcional =====
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
-          bat """
+          bat '''
             @echo off
-            REM -- asignar vars --
-            set "MI_HOST=${params.MI_HOST}"
-            set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
+            REM -- asignar vars desde environment --
+            set "MI_HOST=%MI_HOST%"
+            set "MI_MGMT_PORT=%MI_MGMT_PORT%"
             set "MI_USER=%MI_USER%"
             set "MI_PASS=%MI_PASS%"
+            set "MI_TLS_INSEGURO=%MI_TLS_INSEGURO%"
 
             if "%MI_HOST%"=="" (
               echo ERROR: MI_HOST vacio
@@ -100,10 +101,10 @@ pipeline {
             echo ------------------------------------------
 
             rem Obtener JWT (AccessToken)
-            if "${params.MI_TLS_INSEGURO}"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
+            if "%MI_TLS_INSEGURO%"=="true" (
+              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\nHTTP_STATUS=%{http_code}\n"
             ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
+              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\nHTTP_STATUS=%{http_code}\n"
             )
 
             type login.json
@@ -125,18 +126,18 @@ pipeline {
             for %%F in ("%WORKSPACE%\\target\\*.car") do (
               echo Subiendo: %%~nxF
 
-              if "${params.MI_TLS_INSEGURO}"=="true" (
+              if "%MI_TLS_INSEGURO%"=="true" (
                 curl -k -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
+                  -w "\nHTTP_STATUS=%%{http_code}\n"
               ) else (
                 curl -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
+                  -w "\nHTTP_STATUS=%%{http_code}\n"
               )
 
               if errorlevel 1 (
@@ -147,15 +148,16 @@ pipeline {
 
             echo Despliegue por API completado.
             exit /b 0
-          """
+          '''
         }
       }
     }
 
-    // Stage APIM: crea apim_deploy.cmd y ejecuta; si apictl falla en login o import -> fallback REST
+    // ===== Stage APIM: escribir script .cmd, ejecutarlo con diagnósticos y limpiar temporales =====
     stage('Publicar en API Manager (Windows)') {
       steps {
         script {
+          // Ruta dentro del repo donde está tu swagger
           def oasRelative = 'src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml'
           def oasPath = "${env.WORKSPACE}\\${oasRelative}"
           if (!fileExists(oasPath)) {
@@ -163,6 +165,7 @@ pipeline {
             return
           }
 
+          // Contenido del script .cmd que ejecutará la lógica apictl / fallback REST
           def scriptContent = '''
 @echo off
 setlocal
@@ -282,11 +285,65 @@ if not "%USE_APICTL%"=="1" (
 
 endlocal
 '''
+
+          // escribir el script en el workspace
           writeFile file: "${env.WORKSPACE}\\apim_deploy.cmd", text: scriptContent
         }
 
+        // Ejecutar con credenciales y luego mostrar logs + limpiar temporales
         withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
-          bat "call \"%WORKSPACE%\\apim_deploy.cmd\""
+          bat '''
+            @echo on
+            echo =========================
+            echo Comprobando apim_deploy.cmd en workspace...
+            echo Workspace: %WORKSPACE%
+            echo =========================
+
+            if not exist "%WORKSPACE%\\apim_deploy.cmd" (
+              echo ERROR: apim_deploy.cmd NO encontrado en %WORKSPACE%
+              echo Contenido de %WORKSPACE%:
+              dir "%WORKSPACE%"
+              exit /b 1
+            )
+
+            echo apim_deploy.cmd encontrado. Mostrando contenido (hasta 200 líneas):
+            for /f "usebackq delims=" %%L in (`type "%WORKSPACE%\\apim_deploy.cmd"`) do (
+              echo %%L
+            )
+
+            echo Ejecutando apim_deploy.cmd (cmd /c)...
+            cmd /c "%WORKSPACE%\\apim_deploy.cmd"
+            set "RC=%ERRORLEVEL%"
+            echo apim_deploy.cmd terminó con código %RC%
+
+            rem mostrar logs relevantes si existen
+            if exist "%WORKSPACE%\\apictl_import_err.txt" ( echo ----- apictl_import_err.txt ----- & type "%WORKSPACE%\\apictl_import_err.txt" )
+            if exist "%WORKSPACE%\\apictl_import_out.txt" ( echo ----- apictl_import_out.txt ----- & type "%WORKSPACE%\\apictl_import_out.txt" )
+            if exist "%WORKSPACE%\\apictl_login_err.txt" ( echo ----- apictl_login_err.txt ----- & type "%WORKSPACE%\\apictl_login_err.txt" )
+            if exist "%WORKSPACE%\\apictl_add_env_err.txt" ( echo ----- apictl_add_env_err.txt ----- & type "%WORKSPACE%\\apictl_add_env_err.txt" )
+            if exist "%WORKSPACE%\\import_resp.json" ( echo ----- import_resp.json ----- & type "%WORKSPACE%\\import_resp.json" )
+            if exist "%WORKSPACE%\\import_debug.txt" ( echo ----- import_debug.txt ----- & type "%WORKSPACE%\\import_debug.txt" )
+
+            rem LIMPIEZA: borrar ficheros temporales que creamos
+            del /Q "%WORKSPACE%\\apictl_envs.txt"             >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_envs_err.txt"         >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_add_env_out.txt"      >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_add_env_err.txt"      >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_login_out.txt"        >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_login_err.txt"        >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_import_out.txt"       >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_import_err.txt"       >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_publish_out.txt"      >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apictl_publish_err.txt"      >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\import_resp.json"            >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\import_status.txt"           >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\import_debug.txt"            >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\apim_deploy.cmd"             >nul 2>nul || echo.
+            del /Q "%WORKSPACE%\\login.json"                  >nul 2>nul || echo.
+
+            rem devolver el mismo código de retorno que el script
+            exit /b %RC%
+          '''
         }
       }
     }
@@ -318,6 +375,7 @@ endlocal
         '''
       }
     }
+
   } // stages
 
   post {
