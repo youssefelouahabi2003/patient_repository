@@ -69,7 +69,7 @@ pipeline {
       }
     }
 
-    // Stage MI (sin tocar, como pediste)
+    // Stage MI: sin tocar (tal como lo tenías)
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
@@ -152,7 +152,7 @@ pipeline {
       }
     }
 
-    // Stage APIM: escribimos script .cmd (CORREGIDO) y lo ejecutamos
+    // Stage APIM: escribe y ejecuta apim_deploy.cmd (LOGIN + IMPORT con verbose y captura)
     stage('Publicar en API Manager (Windows)') {
       steps {
         script {
@@ -163,7 +163,7 @@ pipeline {
             return
           }
 
-          // Script corregido: % {http_code} (simple %), ifs anidados, echos debug
+          // script .cmd corregido: añade login y usa --verbose en import
           def scriptContent = '''
 @echo off
 setlocal
@@ -194,7 +194,7 @@ if errorlevel 1 (
 
 echo [DEBUG] USE_APICTL=%USE_APICTL%
 
-rem 2) si apictl disponible -> comprobar/añadir env 'ci' y luego importar
+rem 2) si apictl disponible -> comprobar/añadir env 'ci' y luego login/import
 if "%USE_APICTL%"=="1" (
   echo [DEBUG] list envs
   apictl list env > apictl_envs.txt 2>apictl_envs_err.txt
@@ -204,7 +204,6 @@ if "%USE_APICTL%"=="1" (
   findstr /I /C:"ci" apictl_envs.txt >NUL
   if errorlevel 1 (
     echo Environment 'ci' no encontrado en apictl -> añadiendo...
-    echo [DEBUG] apictl add env ci --apim "https://%APIM_HOST%:%APIM_PORT%" --username "%APIM_USER%" --password "*****" --insecure
     apictl add env ci --apim "https://%APIM_HOST%:%APIM_PORT%" --username "%APIM_USER%" --password "%APIM_PASS%" --insecure > apictl_add_env_out.txt 2> apictl_add_env_err.txt
     if errorlevel 1 (
       echo ERROR: fallo al añadir environment 'ci' en apictl.
@@ -216,13 +215,27 @@ if "%USE_APICTL%"=="1" (
     echo Environment 'ci' ya existe en apictl.
   )
 
-  echo [DEBUG] ahora import
-  apictl import api -f "%OAS_FILE%" -e ci --update > apictl_import_out.txt 2> apictl_import_err.txt
+  rem 2b) login al env ci (necesario antes del import)
+  echo [DEBUG] apictl login ci -u <user> -p <masked> -k
+  apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k > apictl_login_out.txt 2> apictl_login_err.txt
   if errorlevel 1 (
-    echo ERROR: apictl import api falló.
-    if exist apictl_import_err.txt type apictl_import_err.txt
+    echo ERROR: apictl login falló.
+    if exist apictl_login_err.txt type apictl_login_err.txt
     exit /b 1
   )
+  echo apictl login OK.
+
+  rem 3) Import usando apictl (con verbose)
+  echo [DEBUG] apictl import api --verbose
+  apictl import api -f "%OAS_FILE%" -e ci --update --verbose > apictl_import_out.txt 2> apictl_import_err.txt
+  if errorlevel 1 (
+    echo ERROR: apictl import api falló. Imprimiendo logs:
+    if exist apictl_import_out.txt (echo ----- STDOUT ----- & type apictl_import_out.txt)
+    if exist apictl_import_err.txt (echo ----- STDERR ----- & type apictl_import_err.txt)
+    exit /b 1
+  )
+  echo apictl import api OK. Mostrando salida mínima:
+  if exist apictl_import_out.txt type apictl_import_out.txt
 
   rem publicar si se indica (ifs anidados seguros)
   if not "%API_NAME%"=="" (
@@ -241,11 +254,11 @@ if "%USE_APICTL%"=="1" (
   ) else (
     echo API_NAME no proporcionada; salto publish.
   )
+
 ) else (
   rem fallback REST: import via publisher import-openapi
   echo apictl no disponible -> import via REST
-  echo [DEBUG] curl -k -s -o import_resp.json --write-out "%{http_code}" -u "*****:*****" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi"
-  curl -k -s -o import_resp.json --write-out "%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt 2> import_debug.txt
+  curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt 2> import_debug.txt
 
   if exist import_status.txt (
     set /p HTTP_CODE=<import_status.txt
