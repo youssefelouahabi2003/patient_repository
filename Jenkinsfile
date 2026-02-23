@@ -69,7 +69,7 @@ pipeline {
       }
     }
 
-    // Stage MI: sin tocar (tal como lo tenías)
+    // Stage MI (sin tocar)
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
@@ -152,7 +152,7 @@ pipeline {
       }
     }
 
-    // Stage APIM: escribe y ejecuta apim_deploy.cmd (LOGIN + IMPORT con verbose y captura)
+    // Stage APIM: crea apim_deploy.cmd y ejecuta; si apictl falla en login o import -> fallback REST
     stage('Publicar en API Manager (Windows)') {
       steps {
         script {
@@ -163,7 +163,6 @@ pipeline {
             return
           }
 
-          // script .cmd corregido: añade login y usa --verbose en import
           def scriptContent = '''
 @echo off
 setlocal
@@ -194,7 +193,7 @@ if errorlevel 1 (
 
 echo [DEBUG] USE_APICTL=%USE_APICTL%
 
-rem 2) si apictl disponible -> comprobar/añadir env 'ci' y luego login/import
+rem 2) si apictl disponible -> comprobar/añadir env 'ci' y luego intentar login+import
 if "%USE_APICTL%"=="1" (
   echo [DEBUG] list envs
   apictl list env > apictl_envs.txt 2>apictl_envs_err.txt
@@ -208,56 +207,61 @@ if "%USE_APICTL%"=="1" (
     if errorlevel 1 (
       echo ERROR: fallo al añadir environment 'ci' en apictl.
       if exist apictl_add_env_err.txt type apictl_add_env_err.txt
-      exit /b 1
+      echo -> Se hará fallback REST.
+      set "USE_APICTL=0"
+    ) else (
+      echo Environment 'ci' añadido correctamente.
     )
-    echo Environment 'ci' añadido correctamente.
   ) else (
     echo Environment 'ci' ya existe en apictl.
   )
 
-  rem 2b) login al env ci (necesario antes del import)
-  echo [DEBUG] apictl login ci -u <user> -p <masked> -k
-  apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k > apictl_login_out.txt 2> apictl_login_err.txt
-  if errorlevel 1 (
-    echo ERROR: apictl login falló.
-    if exist apictl_login_err.txt type apictl_login_err.txt
-    exit /b 1
-  )
-  echo apictl login OK.
-
-  rem 3) Import usando apictl (con verbose)
-  echo [DEBUG] apictl import api --verbose
-  apictl import api -f "%OAS_FILE%" -e ci --update --verbose > apictl_import_out.txt 2> apictl_import_err.txt
-  if errorlevel 1 (
-    echo ERROR: apictl import api falló. Imprimiendo logs:
-    if exist apictl_import_out.txt (echo ----- STDOUT ----- & type apictl_import_out.txt)
-    if exist apictl_import_err.txt (echo ----- STDERR ----- & type apictl_import_err.txt)
-    exit /b 1
-  )
-  echo apictl import api OK. Mostrando salida mínima:
-  if exist apictl_import_out.txt type apictl_import_out.txt
-
-  rem publicar si se indica (ifs anidados seguros)
-  if not "%API_NAME%"=="" (
-    if not "%API_VERSION%"=="" (
-      echo Publicando API %API_NAME% %API_VERSION% con apictl...
-      apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci > apictl_publish_out.txt 2>apictl_publish_err.txt
-      if errorlevel 1 (
-        echo ERROR: apictl change-status ha fallado.
-        if exist apictl_publish_err.txt type apictl_publish_err.txt
-        exit /b 1
-      )
-      echo API publicada correctamente con apictl.
+  if "%USE_APICTL%"=="1" (
+    echo [DEBUG] Intentando apictl login...
+    apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k > apictl_login_out.txt 2> apictl_login_err.txt
+    if errorlevel 1 (
+      echo El sistema informó: (apictl login falló). Mostrando error:
+      if exist apictl_login_err.txt type apictl_login_err.txt
+      echo -> Haremos fallback REST.
+      set "USE_APICTL=0"
     ) else (
-      echo API_VERSION no proporcionada; salto publish.
-    )
-  ) else (
-    echo API_NAME no proporcionada; salto publish.
-  )
+      echo apictl login OK.
 
-) else (
-  rem fallback REST: import via publisher import-openapi
-  echo apictl no disponible -> import via REST
+      echo [DEBUG] Importando API con apictl (verbose)...
+      apictl import api -f "%OAS_FILE%" -e ci --update --verbose > apictl_import_out.txt 2> apictl_import_err.txt
+      if errorlevel 1 (
+        echo ERROR: apictl import api falló. Imprimiendo logs:
+        if exist apictl_import_out.txt (echo ----- STDOUT ----- & type apictl_import_out.txt)
+        if exist apictl_import_err.txt (echo ----- STDERR ----- & type apictl_import_err.txt)
+        echo -> Haremos fallback REST.
+        set "USE_APICTL=0"
+      ) else (
+        echo apictl import api OK.
+        if not "%API_NAME%"=="" (
+          if not "%API_VERSION%"=="" (
+            echo Publicando API %API_NAME% %API_VERSION% con apictl...
+            apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci > apictl_publish_out.txt 2>apictl_publish_err.txt
+            if errorlevel 1 (
+              echo ERROR: apictl change-status ha fallado.
+              if exist apictl_publish_err.txt type apictl_publish_err.txt
+              echo -> No fatal: quedará en CREATED/pending.
+            ) else (
+              echo API publicada correctamente con apictl.
+            )
+          ) else (
+            echo API_VERSION no proporcionada; salto publish.
+          )
+        ) else (
+          echo API_NAME no proporcionada; salto publish.
+        )
+      )
+    )
+  )
+)
+
+rem 3) Si USE_APICTL==0 o apictl no existe -> fallback REST
+if not "%USE_APICTL%"=="1" (
+  echo Ejecutando fallback REST import...
   curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt 2> import_debug.txt
 
   if exist import_status.txt (
@@ -282,7 +286,6 @@ endlocal
         }
 
         withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
-          // ejecuta el script que acabamos de crear
           bat "call \"%WORKSPACE%\\apim_deploy.cmd\""
         }
       }
