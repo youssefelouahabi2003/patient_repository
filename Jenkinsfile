@@ -9,12 +9,7 @@ pipeline {
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
 
-    string(name: 'APIM_HOST', defaultValue: 'apim.local', description: 'Host API Manager', trim: true)
-    string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
-
-    // Opcionales: si tu openapi no contiene name/version, pásalos aquí para publicar automáticamente
-    string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
-    string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
+    
   }
 
   options {
@@ -134,73 +129,7 @@ pipeline {
       }
     }
 
-    stage('Publicar en API Manager (Windows)') {
-      when { expression { return true } } // siempre ejecutar este stage; quítalo si lo quieres condicional
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
-          bat """
-            @echo off
-            setlocal enabledelayedexpansion
 
-            set "APIM_HOST=${params.APIM_HOST}"
-            set "APIM_PORT=${params.APIM_PORT}"
-            set "OAS_FILE=%WORKSPACE%\\openapi.yaml"
-            set "APIM_USER=%APIM_USER%"
-            set "APIM_PASS=%APIM_PASS%"
-            set "API_NAME=${params.API_NAME}"
-            set "API_VERSION=${params.API_VERSION}"
-
-            if not exist "%OAS_FILE%" (
-              echo ERROR: no encuentro %OAS_FILE%
-              exit /b 1
-            )
-
-            echo Comprobando apictl...
-            where apictl >nul 2>nul
-            if %ERRORLEVEL%==0 (
-              echo apictl encontrado -> uso apictl para import/update
-              apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k --host "https://%APIM_HOST%:%APIM_PORT%"
-
-              echo Importando/actualizando API desde %OAS_FILE%...
-              apictl import-api -f "%OAS_FILE%" -e ci --update
-              if %ERRORLEVEL% neq 0 (
-                echo ERROR: apictl import-api ha fallado
-                exit /b 1
-              )
-
-              REM Si se pasan API_NAME y API_VERSION, intentamos publicar (change-status)
-              if not "%API_NAME%"=="" if not "%API_VERSION%"=="" (
-                echo Publicando API %API_NAME% %API_VERSION% ...
-                apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci
-                if %ERRORLEVEL% neq 0 (
-                  echo ERROR: apictl change-status ha fallado
-                  exit /b 1
-                )
-                echo API publicada correctamente.
-              ) else (
-                echo Aviso: API_NAME/API_VERSION no proporcionados. Si quieres publicar automáticamente, rellena esos parametros en el job.
-                echo Import realizado (la API puede quedar en CREATED si tu definicion no publica automaticamente).
-              )
-            ) else (
-              echo apictl NO encontrado -> fallback REST import
-              curl -k -s -o import_resp.json -w "HTTP_STATUS=%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi?preserveProvider=false" > import_status.txt
-              set /p HTTP_CODE=<import_status.txt
-              echo Import REST HTTP status: %HTTP_CODE%
-
-              if not "%HTTP_CODE%"=="200" if not "%HTTP_CODE%"=="201" (
-                echo ERROR: fallo importando via REST (HTTP %HTTP_CODE%)
-                echo Contenido import_resp.json:
-                type import_resp.json || true
-                exit /b 1
-              )
-              echo Import via REST completado. Nota: publish/lifecycle puede necesitar un cambio adicional via Product APIs.
-            )
-
-            endlocal
-          """
-        }
-      }
-    }
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
