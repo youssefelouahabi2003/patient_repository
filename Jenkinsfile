@@ -10,7 +10,7 @@ pipeline {
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
 
     // Parámetros para API Manager
-    string(name: 'APIM_HOST', defaultValue: 'apim.local', description: 'Host API Manager', trim: true)
+    string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
     string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
     // Opcionales: si tu openapi no contiene name/version, pásalos aquí para publicar automáticamente
     string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
@@ -25,7 +25,7 @@ pipeline {
     MI_RUNTIME_PORT = "${params.MI_RUNTIME_PORT ?: '8290'}"
     HEALTH_PATH     = "${params.HEALTH_PATH ?: '/patients/'}"
 
-    APIM_HOST       = "${params.APIM_HOST ?: 'apim.local'}"
+    APIM_HOST       = "${params.APIM_HOST ?: 'localhost'}"
     APIM_PORT       = "${params.APIM_PORT ?: '9443'}"
     API_NAME        = "${params.API_NAME ?: ''}"
     API_VERSION     = "${params.API_VERSION ?: ''}"
