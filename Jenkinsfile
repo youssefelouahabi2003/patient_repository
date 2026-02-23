@@ -69,7 +69,7 @@ pipeline {
 
     stage('Diagnostic Mi Connectivity') {
       steps {
-        echo "Verificaciones de conectividad y cabeceras para el endpoint de Management"
+        echo "Verificaciones de conectividad y cabeceras para el endpoint de Management (Windows-safe)"
         bat '''
           @echo off
           setlocal
@@ -81,28 +81,42 @@ pipeline {
           echo -------------------------------------------------------
           echo 0) Resolución DNS y reachability
           echo -------------------------------------------------------
-          REM Comprobar resolución DNS (nslookup) y ping (si responde)
-          nslookup %MI_HOST% > dns_lookup.txt 2>&1 || echo "nslookup fallo"
+          nslookup %MI_HOST% > dns_lookup.txt 2>&1
+
           echo ==== dns_lookup.txt ====
-          type dns_lookup.txt || true
+          if exist dns_lookup.txt (
+            type dns_lookup.txt
+          ) else (
+            echo dns_lookup.txt no creado
+          )
 
           echo -------------------------------------------------------
           echo 1) Test-NetConnection (puerto TCP) desde PowerShell
           echo -------------------------------------------------------
           powershell -NoProfile -Command "try { Test-NetConnection -ComputerName '%MI_HOST%' -Port %MI_MGMT_PORT% | Out-File -Encoding ascii testnetconn.txt } catch { 'PS_FAILED' | Out-File -Encoding ascii testnetconn.txt }"
+
           echo ==== testnetconn.txt ====
-          type testnetconn.txt || true
+          if exist testnetconn.txt (
+            type testnetconn.txt
+          ) else (
+            echo testnetconn.txt no creado
+          )
 
           echo -------------------------------------------------------
-          echo 2) HEAD request (curl -I) y guardar headers
+          echo 2) HEAD request (curl -I) y guardar headers (usa NUL en Windows)
           echo -------------------------------------------------------
           if "%MI_TLS_INSEGURO%"=="true" (
-            curl -k -sS -D login_headers.txt -I "%LOGIN_URL%" -o /dev/null || echo "curl HEAD fallo"
+            curl -k -sS -D login_headers.txt -I "%LOGIN_URL%" -o NUL || echo "curl HEAD fallo" > login_headers.txt
           ) else (
-            curl -sS -D login_headers.txt -I "%LOGIN_URL%" -o /dev/null || echo "curl HEAD fallo"
+            curl -sS -D login_headers.txt -I "%LOGIN_URL%" -o NUL || echo "curl HEAD fallo" > login_headers.txt
           )
+
           echo ==== login_headers.txt ====
-          type login_headers.txt || true
+          if exist login_headers.txt (
+            type login_headers.txt
+          ) else (
+            echo login_headers.txt no creado
+          )
 
           endlocal
         '''
@@ -112,7 +126,6 @@ pipeline {
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
-          // bat con diagnóstico paso a paso y dumps para debugging
           bat '''
             @echo off
             setlocal enabledelayedexpansion
@@ -143,54 +156,87 @@ pipeline {
             echo -------------------------------------------------------
 
             REM Limpiar ficheros previos
-            del /q login.json login_status.txt login_debug.txt login_headers.txt token.txt 2>nul || true
+            if exist login.json del /q login.json
+            if exist login_status.txt del /q login_status.txt
+            if exist login_debug.txt del /q login_debug.txt
+            if exist login_headers.txt del /q login_headers.txt
+            if exist token.txt del /q token.txt
 
             REM ---- intento 1: Basic Auth (verbose) ----
             echo [DEBUG] Intento BasicAuth (curl -v). stdout->login.json stderr->login_debug.txt, HTTP->login_status.txt
             if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
+              curl -k -v -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
+              curl -v -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             )
 
-            set /p HTTP_CODE=<login_status.txt
-            echo Login HTTP status: %HTTP_CODE%
-            echo ==== login_debug.txt (stderr curl verbose) ====
-            type login_debug.txt || true
-
-            REM Guardar headers también para inspección (HEAD request)
-            if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -D login_headers.txt -I "%LOGIN%" -o /dev/null || echo "curl HEAD fallo" > login_headers.txt
+            if exist login_status.txt (
+              set /p HTTP_CODE=<login_status.txt
             ) else (
-              curl -sS -D login_headers.txt -I "%LOGIN%" -o /dev/null || echo "curl HEAD fallo" > login_headers.txt
+              set "HTTP_CODE="
+            )
+            echo Login HTTP status: %HTTP_CODE%
+
+            echo ==== login_debug.txt (stderr curl verbose) ====
+            if exist login_debug.txt (
+              type login_debug.txt
+            ) else (
+              echo login_debug.txt no creado
+            )
+
+            REM Guardar headers también para inspección (HEAD request) - NUL en Windows
+            if "%MI_TLS_INSEGURO%"=="true" (
+              curl -k -sS -D login_headers.txt -I "%LOGIN%" -o NUL || echo "HEAD_FAIL" > login_headers.txt
+            ) else (
+              curl -sS -D login_headers.txt -I "%LOGIN%" -o NUL || echo "HEAD_FAIL" > login_headers.txt
             )
             echo ==== login_headers.txt ====
-            type login_headers.txt || true
+            if exist login_headers.txt (
+              type login_headers.txt
+            ) else (
+              echo login_headers.txt no creado
+            )
 
             REM Si 200 -> parse token, si 401 -> intentar POST JSON
             if "%HTTP_CODE%"=="200" goto :parse_token
+
             echo NOT 200. Intentaremos POST JSON (si BasicAuth no funciona). (HTTP %HTTP_CODE%)
 
             REM ---- intento 2: POST JSON (verbose) ----
             echo [DEBUG] Intento POST JSON (curl -v)
             if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
+              curl -k -v -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             ) else (
-              curl -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
+              curl -v -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt 2>login_debug.txt
             )
 
-            set /p HTTP_CODE=<login_status.txt
+            if exist login_status.txt (
+              set /p HTTP_CODE=<login_status.txt
+            ) else (
+              set "HTTP_CODE="
+            )
             echo Login POST JSON HTTP status: %HTTP_CODE%
+
             echo ==== login_debug.txt (stderr curl verbose) ====
-            type login_debug.txt || true
+            if exist login_debug.txt (
+              type login_debug.txt
+            ) else (
+              echo login_debug.txt no creado
+            )
 
             if not "%HTTP_CODE%"=="200" (
               echo ERROR: login a MI falló tras ambos intentos (HTTP %HTTP_CODE%).
               echo ==== login.json (respuesta) ====
-              type login.json || true
+              if exist login.json (
+                type login.json
+              ) else (
+                echo login.json no creado
+              )
 
               REM chequeo rápido si la respuesta es HTML (form/login page)
-              findstr /i "<html" login.json > nul 2>nul && echo Nota: la respuesta parece ser HTML (posible página de login) || echo Nota: la respuesta no parece HTML.
+              if exist login.json (
+                findstr /i "<html" login.json > nul 2>nul && echo Nota: la respuesta parece ser HTML (posible página de login) || echo Nota: la respuesta no parece HTML.
+              )
 
               echo -------------------------------------------------------
               echo CHECKLIST SUGERIDO:
@@ -211,18 +257,23 @@ pipeline {
             if %ERRORLEVEL% neq 0 (
               echo ERROR: No se pudo parsear login.json para extraer AccessToken.
               echo ==== login.json ====
-              type login.json || true
+              if exist login.json (
+                type login.json
+              ) else (
+                echo login.json no creado
+              )
               exit /b 1
             )
 
             set /p TOKEN=<token.txt
             if "%TOKEN%"=="" (
               echo ERROR: token vacío tras parseo.
-              type login.json || true
+              if exist login.json (
+                type login.json
+              )
               exit /b 1
             )
 
-            REM ocultar token para no imprimirlo en logs
             echo Token obtenido (oculto).
             echo -------------------------------------------------------
             echo 2) Subir .car usando Bearer token
@@ -246,15 +297,23 @@ pipeline {
                   --write-out "%%{http_code}" > upload_status.txt 2>upload_debug.txt
               )
 
-              set /p UP_HTTP=<upload_status.txt
+              if exist upload_status.txt (
+                set /p UP_HTTP=<upload_status.txt
+              ) else (
+                set "UP_HTTP="
+              )
               echo Upload HTTP status: %UP_HTTP%
+
               echo ==== upload_debug.txt ====
-              type upload_debug.txt || true
+              if exist upload_debug.txt (
+                type upload_debug.txt
+              ) else (
+                echo upload_debug.txt no creado
+              )
 
               if not "%UP_HTTP%"=="200" if not "%UP_HTTP%"=="201" (
                 echo ERROR: fallo subiendo %%~nxF (HTTP %UP_HTTP%)
-                echo ==== upload_debug.txt ====
-                type upload_debug.txt || true
+                if exist upload_debug.txt type upload_debug.txt
                 exit /b 1
               )
             )
@@ -320,13 +379,17 @@ pipeline {
             ) else (
               echo apictl NO encontrado -> fallback REST import
               curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt
-              set /p HTTP_CODE=<import_status.txt
+              if exist import_status.txt (
+                set /p HTTP_CODE=<import_status.txt
+              ) else (
+                set "HTTP_CODE="
+              )
               echo Import REST HTTP status: %HTTP_CODE%
 
               if not "%HTTP_CODE%"=="200" if not "%HTTP_CODE%"=="201" (
                 echo ERROR: fallo importando via REST (HTTP %HTTP_CODE%)
                 echo Contenido import_resp.json:
-                type import_resp.json || true
+                if exist import_resp.json type import_resp.json
                 exit /b 1
               )
               echo Import via REST completado.
