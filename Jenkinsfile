@@ -95,39 +95,60 @@ pipeline {
             set "APPS=%BASE%/applications"
 
             echo ------------------------------------------
-            echo 1) Login para obtener JWT
+            echo 1) Intentando login (Basic Auth) para obtener JWT
             echo LOGIN: %LOGIN%
             echo ------------------------------------------
 
-            REM Nota: en Windows cmd hay que escapar el % de curl --write-out usando %%
-            REM Guardamos cuerpo y HTTP status en ficheros separados
+            REM Intento 1: Basic Auth. Guardamos cuerpo y HTTP status.
             if "%MI_TLS_INSEGURO%"=="true" (
               curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
             ) else (
               curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
             )
 
-            REM Leer código HTTP
             set /p HTTP_CODE=<login_status.txt
             echo Login HTTP status: %HTTP_CODE%
 
-            if "%HTTP_CODE%" neq "200" (
-              echo ERROR: login a MI falló (HTTP %HTTP_CODE%).
+            if "%HTTP_CODE%"=="200" goto :parse_token
+
+            echo NOT 200. Intentaremos POST JSON (si BasicAuth no funciona). (HTTP %HTTP_CODE%)
+
+            REM Intento 2: POST JSON con username/password (algunas versiones/configs requieren body JSON)
+            if "%MI_TLS_INSEGURO%"=="true" (
+              curl -k -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+            ) else (
+              curl -sS -X POST -H "Content-Type: application/json" -d "{\"username\":\"%MI_USER%\",\"password\":\"%MI_PASS%\"}" "%LOGIN%" -o login.json --write-out "%%{http_code}" > login_status.txt
+            )
+
+            set /p HTTP_CODE=<login_status.txt
+            echo Login POST JSON HTTP status: %HTTP_CODE%
+
+            if not "%HTTP_CODE%"=="200" (
+              echo ERROR: login a MI falló tras ambos intentos (HTTP %HTTP_CODE%).
+              echo Contenido de login.json para debugging:
+              type login.json || true
+              exit /b 1
+            )
+
+            :parse_token
+            REM Extraer AccessToken con PowerShell: escribir token ASCII a token.txt
+            powershell -NoProfile -Command ^
+              "try { $j = Get-Content 'login.json' -Raw | ConvertFrom-Json; if ($j -and $j.AccessToken) { $j.AccessToken | Out-File -Encoding ascii token.txt } else { exit 2 } } catch { exit 2 }"
+
+            if %ERRORLEVEL% neq 0 (
+              echo ERROR: No se pudo parsear login.json para extraer AccessToken.
               echo Contenido de login.json:
               type login.json || true
               exit /b 1
             )
 
-            REM Extraer AccessToken con PowerShell (o con jq si disponible)
-            for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set "TOKEN=%%T"
-
+            set /p TOKEN=<token.txt
             if "%TOKEN%"=="" (
-              echo ERROR: No se pudo obtener token desde login.json. Mostrar login.json para debugging:
+              echo ERROR: token vacío tras parseo.
               type login.json || true
               exit /b 1
             )
 
-            REM ocultar token para no imprimirlo en logs
             echo Token obtenido (oculto).
             echo ------------------------------------------
             echo 2) Subir .car usando Bearer token
@@ -156,9 +177,9 @@ pipeline {
 
               if not "%UP_HTTP%"=="200" if not "%UP_HTTP%"=="201" (
                 echo ERROR: fallo subiendo %%~nxF (HTTP %UP_HTTP%)
+                type import_resp.json || true
                 exit /b 1
               )
-
             )
 
             echo Despliegue por API completado.
