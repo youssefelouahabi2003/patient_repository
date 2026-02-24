@@ -1,14 +1,79 @@
 openapi: 3.0.1
 info:
   title: MI_PATIENT
-  description: API Definition of HealthcareAPI1
+  description: API Definition for the MI_PATIENT Synapse API
   version: 1.0.0
 servers:
-- url: http://localhost:8290/patients
-- url: https://localhost:8253/patients
+  - url: http://localhost:8290/patientlist
+    description: Runtime HTTP endpoint (non-TLS)
+  - url: https://localhost:8253/patientlist
+    description: Runtime HTTPS endpoint (TLS)
 paths:
   /:
     get:
+      summary: Obtener listado de pacientes
+      description: Devuelve un objeto con la lista de pacientes (id, name, age, diagnosis).
+      operationId: getPatients
       responses:
-        default:
-          description: Default response
+        '200':
+          description: Lista de pacientes (éxito)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatientsResponse'
+              examples:
+                ejemplo-pacientes:
+                  summary: Respuesta ejemplo
+                  value:
+                    patients:
+                      - id: 1
+                        name: "Juan Pérez"
+                        age: 45
+                        diagnosis: "Diabetes"
+                      - id: 2
+                        name: "María López"
+                        age: 32
+                        diagnosis: "Hipertensión"
+                      - id: 3
+                        name: "Carlos Gómez"
+                        age: 60
+                        diagnosis: "Asma"
+                      - id: 4
+                        name: "Ana Martínez"
+                        age: 27
+                        diagnosis: "Migraña"
+        '4XX':
+          description: Error de cliente
+        '5XX':
+          description: Error de servidor
+components:
+  schemas:
+    Patient:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "Juan Pérez"
+        age:
+          type: integer
+          example: 45
+        diagnosis:
+          type: string
+          example: "Diabetes"
+      required:
+        - id
+        - name
+        - age
+        - diagnosis
+    PatientsResponse:
+      type: object
+      properties:
+        patients:
+          type: array
+          items:
+            $ref: '#/components/schemas/Patient'
+      required:
+        - patients
