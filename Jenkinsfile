@@ -136,7 +136,7 @@ pipeline {
     ]) {
       bat '''
         @echo off
-        setlocal enabledelayedexpansion
+        setlocal
 
         rem ====== APIM fijo a tu entorno ======
         set "APIM_HOST=localhost"
@@ -150,9 +150,8 @@ pipeline {
         rem ====== Backend (MI runtime) ======
         set "BACKEND_URL=http://localhost:8290"
 
-        rem ====== Swagger/OpenAPI (ruta fija en tu repo) ======
+        rem ====== Swagger/OpenAPI (ruta fija) ======
         set "OAS_FILE=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
-
         if not exist "%OAS_FILE%" (
           echo ERROR: No existe el swagger/openapi en:
           echo   %OAS_FILE%
@@ -162,162 +161,107 @@ pipeline {
         echo Usando definicion OpenAPI/Swagger:
         echo   %OAS_FILE%
 
-        rem Cert TLS self-signed en local
-        set "TLS=-k"
-
-        rem ---- 1) DCR: crear OAuth app (clientId/clientSecret) ----
-        set "DCR_URL=https://%APIM_HOST%:%APIM_PORT%/client-registration/v0.17/register"
-
-        echo ------------------------------------------
-        echo 1) DCR (registrar OAuth app)
-        echo DCR_URL: %DCR_URL%
-        echo ------------------------------------------
-
-        set "DCR_PAYLOAD={\\"callbackUrl\\":\\"http://localhost\\",\\"clientName\\":\\"jenkins_publisher_api\\",\\"tokenScope\\":\\"Production\\",\\"owner\\":\\"%APIM_USER%\\",\\"grantType\\":\\"password refresh_token\\",\\"saasApp\\":true}"
-
-        curl %TLS% -sS -u "%APIM_USER%:%APIM_PASS%" ^
-          -H "Content-Type: application/json" ^
-          -d "%DCR_PAYLOAD%" ^
-          "%DCR_URL%" -o dcr.json
-
-        powershell -NoProfile -Command "$d=ConvertFrom-Json (Get-Content dcr.json -Raw); $d.clientId" > client_id.txt
-        powershell -NoProfile -Command "$d=ConvertFrom-Json (Get-Content dcr.json -Raw); $d.clientSecret" > client_secret.txt
-
-        set /p CLIENT_ID=<client_id.txt
-        set /p CLIENT_SECRET=<client_secret.txt
-
-        if "%CLIENT_ID%"=="" (
-          echo ERROR: DCR no devolvio clientId. Respuesta:
-          type dcr.json
-          exit /b 1
-        )
-        if "%CLIENT_SECRET%"=="" (
-          echo ERROR: DCR no devolvio clientSecret. Respuesta:
-          type dcr.json
-          exit /b 1
-        )
-
-        rem ---- 2) Token OAuth2 (password grant) ----
-        set "TOKEN_URL=https://%APIM_HOST%:%APIM_PORT%/oauth2/token"
-        set "SCOPE=apim:api_view apim:api_create apim:api_manage"
-
-        echo ------------------------------------------
-        echo 2) Token OAuth2 (password grant)
-        echo TOKEN_URL: %TOKEN_URL%
-        echo ------------------------------------------
-
-        curl %TLS% -sS -u "%CLIENT_ID%:%CLIENT_SECRET%" ^
-          -H "Content-Type: application/x-www-form-urlencoded" ^
-          -d "grant_type=password&username=%APIM_USER%&password=%APIM_PASS%&scope=%SCOPE%" ^
-          "%TOKEN_URL%" -o apim_token.json
-
-        powershell -NoProfile -Command "$t=ConvertFrom-Json (Get-Content apim_token.json -Raw); $t.access_token" > token.txt
-        set /p APIM_TOKEN=<token.txt
-
-        if "%APIM_TOKEN%"=="" (
-          echo ERROR: No se pudo obtener access_token.
-          type apim_token.json
-          exit /b 1
-        )
-
-        echo ------------------------------------------
-        echo TOKEN (MOSTRADO POR PETICION TUYA):
-        echo %APIM_TOKEN%
-        echo ------------------------------------------
-
-        rem ---- 3) Buscar API existente (GET /apis = getAllAPIs) ----
-        set "PUB_BASE=https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v4"
-
-        rem IMPORTANTE: el %20 hay que ponerlo como %%20 en CMD
-        set "LIST_URL=%PUB_BASE%/apis?query=name:!API_NAME!%%20version:!API_VERSION!"
-
-        echo ------------------------------------------
-        echo 3) Buscar API existente (GET /apis)
-        echo LIST_URL: !LIST_URL!
-        echo ------------------------------------------
-
-        curl %TLS% -sS ^
-          -H "Authorization: Bearer %APIM_TOKEN%" ^
-          -H "Accept: application/json" ^
-          "!LIST_URL!" -o apis.json
-
-        rem Extraer API_ID sin FOR /F (evita el error "No se esperaba .")
-        powershell -NoProfile -Command "$obj=ConvertFrom-Json (Get-Content apis.json -Raw); if($obj.count -gt 0){$obj.list[0].id}else{''}" > api_id.txt
-        set /p API_ID=<api_id.txt
-
-        if "%API_ID%"=="" (
-          echo No existe el API en APIM: %API_NAME% %API_VERSION% (se creara).
-          goto createApi
-        ) else (
-          echo API encontrado. ID=%API_ID% (se actualizara swagger).
-          goto updateSwagger
-        )
-
-        :createApi
-        rem ---- 4A) Crear API (POST /apis/import-openapi) ----
-        set "IMPORT_URL=%PUB_BASE%/apis/import-openapi"
-
-        set "ENDPOINTCFG={\\"endpoint_type\\":\\"http\\",\\"sandbox_endpoints\\":{\\"url\\":\\"%BACKEND_URL%\\"},\\"production_endpoints\\":{\\"url\\":\\"%BACKEND_URL%\\"}}"
-        set "ADDITIONAL={\\"name\\":\\"%API_NAME%\\",\\"version\\":\\"%API_VERSION%\\",\\"context\\":\\"%API_CONTEXT%\\",\\"endpointConfig\\":\\"%ENDPOINTCFG%\\"}"
-
-        echo ------------------------------------------
-        echo 4A) Crear API (POST /apis/import-openapi)
-        echo IMPORT_URL: %IMPORT_URL%
-        echo BACKEND_URL: %BACKEND_URL%
-        echo ------------------------------------------
-
-        curl %TLS% -f -sS -X POST "%IMPORT_URL%" ^
-          -H "Authorization: Bearer %APIM_TOKEN%" ^
-          -H "Accept: application/json" ^
-          -F "file=@%OAS_FILE%" ^
-          -F "additionalProperties=%ADDITIONAL%" ^
-          -o created_api.json
+        powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+          "$ErrorActionPreference='Stop';" ^
+          "# --- ignorar TLS self-signed (Windows PowerShell 5.1 compatible) ---" ^
+          "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;" ^
+          "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true};" ^
+          "" ^
+          "$apimHost=$env:APIM_HOST; $apimPort=$env:APIM_PORT;" ^
+          "$user=$env:APIM_USER; $pass=$env:APIM_PASS;" ^
+          "$apiName=$env:API_NAME; $apiVersion=$env:API_VERSION; $apiContext=$env:API_CONTEXT;" ^
+          "$backend=$env:BACKEND_URL;" ^
+          "$oasFile=$env:OAS_FILE;" ^
+          "" ^
+          "Write-Host '------------------------------------------';" ^
+          "Write-Host '1) DCR (registrar OAuth app)';" ^
+          "$dcrUrl = \"https://$apimHost`:$apimPort/client-registration/v0.17/register\";" ^
+          "Write-Host ('DCR_URL: ' + $dcrUrl);" ^
+          "$basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(\"$user`:$pass\"));" ^
+          "$dcrPayload = @{callbackUrl='http://localhost'; clientName='jenkins_publisher_api'; tokenScope='Production'; owner=$user; grantType='password refresh_token'; saasApp=$true} | ConvertTo-Json -Compress;" ^
+          "$dcrResp = Invoke-RestMethod -Method Post -Uri $dcrUrl -Headers @{Authorization=\"Basic $basic\"; 'Content-Type'='application/json'} -Body $dcrPayload;" ^
+          "$clientId = $dcrResp.clientId; $clientSecret = $dcrResp.clientSecret;" ^
+          "if(-not $clientId -or -not $clientSecret){ throw ('DCR sin clientId/clientSecret. Respuesta: ' + ($dcrResp | ConvertTo-Json -Compress)) }" ^
+          "" ^
+          "Write-Host '------------------------------------------';" ^
+          "Write-Host '2) Token OAuth2 (password grant)';" ^
+          "$tokenUrl = \"https://$apimHost`:$apimPort/oauth2/token\";" ^
+          "Write-Host ('TOKEN_URL: ' + $tokenUrl);" ^
+          "$scope = 'apim:api_view apim:api_create apim:api_manage';" ^
+          "$basicApp = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(\"$clientId`:$clientSecret\"));" ^
+          "$body = \"grant_type=password&username=$([uri]::EscapeDataString($user))&password=$([uri]::EscapeDataString($pass))&scope=$([uri]::EscapeDataString($scope))\";" ^
+          "$tokResp = Invoke-RestMethod -Method Post -Uri $tokenUrl -Headers @{Authorization=\"Basic $basicApp\"; 'Content-Type'='application/x-www-form-urlencoded'} -Body $body;" ^
+          "$token = $tokResp.access_token;" ^
+          "if(-not $token){ throw ('No access_token. Respuesta: ' + ($tokResp | ConvertTo-Json -Compress)) }" ^
+          "" ^
+          "Write-Host '------------------------------------------';" ^
+          "Write-Host 'TOKEN (MOSTRADO POR PETICION TUYA):';" ^
+          "Write-Host $token;" ^
+          "Write-Host '------------------------------------------';" ^
+          "" ^
+          "Write-Host '3) Buscar API existente (GET /apis)';" ^
+          "$pubBase = \"https://$apimHost`:$apimPort/api/am/publisher/v4\";" ^
+          "$q = \"name:$apiName version:$apiVersion\";" ^
+          "$listUrl = \"$pubBase/apis?query=$([uri]::EscapeDataString($q))\";" ^
+          "Write-Host ('LIST_URL: ' + $listUrl);" ^
+          "$apis = Invoke-RestMethod -Method Get -Uri $listUrl -Headers @{Authorization=\"Bearer $token\"; Accept='application/json'};" ^
+          "$apiId = '';" ^
+          "if($apis -and $apis.count -gt 0 -and $apis.list -and $apis.list.Count -gt 0){ $apiId = $apis.list[0].id }" ^
+          "" ^
+          "if([string]::IsNullOrWhiteSpace($apiId)){" ^
+          "  Write-Host ('No existe el API en APIM: ' + $apiName + ' ' + $apiVersion + ' (se creara).');" ^
+          "  # ---- Crear API: import-openapi ----" ^
+          "  $importUrl = \"$pubBase/apis/import-openapi\";" ^
+          "  $endpointCfg = @{ endpoint_type='http'; sandbox_endpoints=@{url=$backend}; production_endpoints=@{url=$backend} } | ConvertTo-Json -Compress;" ^
+          "  $additional = @{ name=$apiName; version=$apiVersion; context=$apiContext; endpointConfig=$endpointCfg } | ConvertTo-Json -Compress;" ^
+          "  # multipart/form-data con .NET (sin curl) " ^
+          "  Add-Type -AssemblyName System.Net.Http;" ^
+          "  $handler = New-Object System.Net.Http.HttpClientHandler;" ^
+          "  $handler.ServerCertificateCustomValidationCallback = { $true };" ^
+          "  $client = New-Object System.Net.Http.HttpClient($handler);" ^
+          "  $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $token);" ^
+          "  $content = New-Object System.Net.Http.MultipartFormDataContent;" ^
+          "  $fileBytes = [IO.File]::ReadAllBytes($oasFile);" ^
+          "  $fileContent = New-Object System.Net.Http.ByteArrayContent($fileBytes);" ^
+          "  $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream');" ^
+          "  $content.Add($fileContent, 'file', [IO.Path]::GetFileName($oasFile));" ^
+          "  $content.Add((New-Object System.Net.Http.StringContent($additional)), 'additionalProperties');" ^
+          "  $resp = $client.PostAsync($importUrl, $content).Result;" ^
+          "  $respBody = $resp.Content.ReadAsStringAsync().Result;" ^
+          "  if(-not $resp.IsSuccessStatusCode){ throw ('import-openapi fallo: ' + $resp.StatusCode + ' ' + $respBody) }" ^
+          "  $created = $respBody | ConvertFrom-Json;" ^
+          "  $apiId = $created.id;" ^
+          "  if(-not $apiId){ throw ('import-openapi OK pero sin id: ' + $respBody) }" ^
+          "  Write-Host ('API creado. ID=' + $apiId);" ^
+          "} else {" ^
+          "  Write-Host ('API encontrado. ID=' + $apiId + ' (se actualizara swagger).');" ^
+          "  # ---- Update swagger: PUT /apis/{apiId}/swagger ----" ^
+          "  $swaggerUrl = \"$pubBase/apis/$apiId/swagger\";" ^
+          "  Add-Type -AssemblyName System.Net.Http;" ^
+          "  $handler = New-Object System.Net.Http.HttpClientHandler;" ^
+          "  $handler.ServerCertificateCustomValidationCallback = { $true };" ^
+          "  $client = New-Object System.Net.Http.HttpClient($handler);" ^
+          "  $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $token);" ^
+          "  $content = New-Object System.Net.Http.MultipartFormDataContent;" ^
+          "  $fileBytes = [IO.File]::ReadAllBytes($oasFile);" ^
+          "  $fileContent = New-Object System.Net.Http.ByteArrayContent($fileBytes);" ^
+          "  $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream');" ^
+          "  $content.Add($fileContent, 'file', [IO.Path]::GetFileName($oasFile));" ^
+          "  $resp = $client.PutAsync($swaggerUrl, $content).Result;" ^
+          "  $respBody = $resp.Content.ReadAsStringAsync().Result;" ^
+          "  if(-not $resp.IsSuccessStatusCode){ throw ('update swagger fallo: ' + $resp.StatusCode + ' ' + $respBody) }" ^
+          "  Write-Host ('Swagger actualizado OK para API_ID=' + $apiId);" ^
+          "}" ^
+          "" ^
+          "Write-Host '------------------------------------------';" ^
+          "Write-Host ('APIM OK. API_ID=' + $apiId);" ^
+          "Write-Host '------------------------------------------';"
 
         if errorlevel 1 (
-          echo ERROR: fallo creando API con import-openapi
-          type created_api.json
+          echo ERROR: Stage APIM fallo. Revisa logs arriba (PowerShell).
           exit /b 1
         )
 
-        powershell -NoProfile -Command "$c=ConvertFrom-Json (Get-Content created_api.json -Raw); $c.id" > api_id2.txt
-        set /p API_ID=<api_id2.txt
-
-        if "%API_ID%"=="" (
-          echo ERROR: import-openapi no devolvio id de API
-          type created_api.json
-          exit /b 1
-        )
-
-        echo API creado. ID=%API_ID%
-        goto done
-
-        :updateSwagger
-        rem ---- 4B) Actualizar Swagger (PUT /apis/{apiId}/swagger) ----
-        set "SWAGGER_URL=%PUB_BASE%/apis/%API_ID%/swagger"
-
-        echo ------------------------------------------
-        echo 4B) Actualizar Swagger (PUT /apis/{apiId}/swagger)
-        echo SWAGGER_URL: %SWAGGER_URL%
-        echo ------------------------------------------
-
-        curl %TLS% -f -sS -X PUT "%SWAGGER_URL%" ^
-          -H "Authorization: Bearer %APIM_TOKEN%" ^
-          -H "Accept: application/json" ^
-          -F "file=@%OAS_FILE%" ^
-          -o swagger_update.json
-
-        if errorlevel 1 (
-          echo ERROR: fallo actualizando swagger
-          type swagger_update.json
-          exit /b 1
-        )
-
-        echo Swagger actualizado OK para API_ID=%API_ID%
-
-        :done
-        echo ------------------------------------------
-        echo APIM OK. API_ID=%API_ID%
-        echo ------------------------------------------
         exit /b 0
       '''
     }
