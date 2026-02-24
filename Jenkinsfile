@@ -180,8 +180,11 @@ pipeline {
           -d "%DCR_PAYLOAD%" ^
           "%DCR_URL%" -o dcr.json
 
-        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-Content dcr.json -Raw | ConvertFrom-Json).clientId"`) do set "CLIENT_ID=%%I"
-        for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command "(Get-Content dcr.json -Raw | ConvertFrom-Json).clientSecret"`) do set "CLIENT_SECRET=%%S"
+        powershell -NoProfile -Command "$d=ConvertFrom-Json (Get-Content dcr.json -Raw); $d.clientId" > client_id.txt
+        powershell -NoProfile -Command "$d=ConvertFrom-Json (Get-Content dcr.json -Raw); $d.clientSecret" > client_secret.txt
+
+        set /p CLIENT_ID=<client_id.txt
+        set /p CLIENT_SECRET=<client_secret.txt
 
         if "%CLIENT_ID%"=="" (
           echo ERROR: DCR no devolvio clientId. Respuesta:
@@ -208,18 +211,24 @@ pipeline {
           -d "grant_type=password&username=%APIM_USER%&password=%APIM_PASS%&scope=%SCOPE%" ^
           "%TOKEN_URL%" -o apim_token.json
 
-        for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Content apim_token.json -Raw | ConvertFrom-Json).access_token"`) do set "APIM_TOKEN=%%T"
+        powershell -NoProfile -Command "$t=ConvertFrom-Json (Get-Content apim_token.json -Raw); $t.access_token" > token.txt
+        set /p APIM_TOKEN=<token.txt
+
         if "%APIM_TOKEN%"=="" (
           echo ERROR: No se pudo obtener access_token.
           type apim_token.json
           exit /b 1
         )
-        echo Token APIM obtenido (oculto).
+
+        echo ------------------------------------------
+        echo TOKEN (MOSTRADO POR PETICION TUYA):
+        echo %APIM_TOKEN%
+        echo ------------------------------------------
 
         rem ---- 3) Buscar API existente (GET /apis = getAllAPIs) ----
         set "PUB_BASE=https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v4"
 
-        rem FIX REAL: usa delayed expansion para evitar que CMD interprete %20 como %2 + 0
+        rem IMPORTANTE: el %20 hay que ponerlo como %%20 en CMD
         set "LIST_URL=%PUB_BASE%/apis?query=name:!API_NAME!%%20version:!API_VERSION!"
 
         echo ------------------------------------------
@@ -232,8 +241,9 @@ pipeline {
           -H "Accept: application/json" ^
           "!LIST_URL!" -o apis.json
 
-        rem Extraer API_ID
-        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$obj=(Get-Content apis.json -Raw|ConvertFrom-Json); if($obj.count -gt 0){$obj.list[0].id}else{''}"`) do set "API_ID=%%I"
+        rem Extraer API_ID sin FOR /F (evita el error "No se esperaba .")
+        powershell -NoProfile -Command "$obj=ConvertFrom-Json (Get-Content apis.json -Raw); if($obj.count -gt 0){$obj.list[0].id}else{''}" > api_id.txt
+        set /p API_ID=<api_id.txt
 
         if "%API_ID%"=="" (
           echo No existe el API en APIM: %API_NAME% %API_VERSION% (se creara).
@@ -269,7 +279,9 @@ pipeline {
           exit /b 1
         )
 
-        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-Content created_api.json -Raw|ConvertFrom-Json).id"`) do set "API_ID=%%I"
+        powershell -NoProfile -Command "$c=ConvertFrom-Json (Get-Content created_api.json -Raw); $c.id" > api_id2.txt
+        set /p API_ID=<api_id2.txt
+
         if "%API_ID%"=="" (
           echo ERROR: import-openapi no devolvio id de API
           type created_api.json
