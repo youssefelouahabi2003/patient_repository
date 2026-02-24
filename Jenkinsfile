@@ -138,6 +138,7 @@ stage('Publicar API desde Swagger (.car or repo)') {
         @echo off
         setlocal
 
+        rem ---------- Config ----------
         set "APIM_HOST=localhost"
         set "APIM_PORT=9443"
 
@@ -145,19 +146,30 @@ stage('Publicar API desde Swagger (.car or repo)') {
         set "API_VERSION=1.0.0"
         set "API_CONTEXT=/pepedoctor"
 
+        rem Backend MI
+        set "BACKEND_URL=http://localhost:8290"
+
+        rem Ruta swagger en repo (fallback)
         set "REPO_OAS=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
+
+        rem Carpeta temporal para extraer car
         set "CAR_EXTRACT=%WORKSPACE%\\car_extract"
+
+        rem TLS insecure local
         set "TLS=-k"
 
         echo ---------------------------------------------------------
         echo 0) Buscar swagger: preferencia .car -> si no, fichero del repo
         echo ---------------------------------------------------------
 
+        rem Buscar primer .car en target
         powershell -NoProfile -Command ^
           "$car = Get-ChildItem -Path '%WORKSPACE%\\target' -Filter '*.car' -ErrorAction SilentlyContinue | Select-Object -First 1; if($car){ $car.FullName }" > car_found.txt
 
         set "CAR_FILE="
-        if exist car_found.txt set /p CAR_FILE=<car_found.txt
+        if exist car_found.txt (
+          set /p CAR_FILE=<car_found.txt
+        )
 
         set "FOUND_SWAGGER="
         if defined CAR_FILE (
@@ -166,7 +178,9 @@ stage('Publicar API desde Swagger (.car or repo)') {
           powershell -NoProfile -Command "Expand-Archive -Force -Path '%CAR_FILE%' -DestinationPath '%CAR_EXTRACT%';"
           powershell -NoProfile -Command ^
             "$f = Get-ChildItem -Path '%CAR_EXTRACT%' -Recurse -Include '*.yaml','*.yml','*.json' -ErrorAction SilentlyContinue | Select-Object -First 1; if($f){ $f.FullName }" > swagger_path.txt
-          if exist swagger_path.txt set /p FOUND_SWAGGER=<swagger_path.txt
+          if exist swagger_path.txt (
+            set /p FOUND_SWAGGER=<swagger_path.txt
+          )
         )
 
         if defined FOUND_SWAGGER (
@@ -182,45 +196,84 @@ stage('Publicar API desde Swagger (.car or repo)') {
           exit /b 1
         )
 
-        rem ----------------- DCR -----------------
+        echo Usando OpenAPI/Swagger: %OAS_FILE%
+        echo ---------------------------------------------------------
+
+        rem ----------------- 1) DCR -----------------
         set "DCR_URL=https://%APIM_HOST%:%APIM_PORT%/client-registration/v0.17/register"
+        echo DCR_URL: %DCR_URL%
+
+        rem Crear dcr_payload.json SIN BOM de forma robusta
         powershell -NoProfile -Command ^
-          "$o=@{callbackUrl='http://localhost';clientName='jenkins_publisher_api';tokenScope='Production';owner=$env:APIM_USER;grantType='password refresh_token';saasApp=$true};" ^
-          "$s = $o | ConvertTo-Json -Compress; [System.IO.File]::WriteAllText('dcr_payload.json',$s,(New-Object System.Text.UTF8Encoding($false)))"
+          "$obj = [ordered]@{ callbackUrl='http://localhost'; clientName='jenkins_publisher_api'; tokenScope='Production'; owner=$env:APIM_USER; grantType='password refresh_token'; saasApp=$true };" ^
+          "$json = $obj | ConvertTo-Json -Compress;" ^
+          "[System.IO.File]::WriteAllText('dcr_payload.json',$json,(New-Object System.Text.UTF8Encoding($false)))"
 
-        curl %TLS% -sS -u "%APIM_USER%:%APIM_PASS%" -H "Content-Type: application/json" --data-binary @dcr_payload.json "%DCR_URL%" -o dcr.json || ( type dcr.json & exit /b 1 )
+        curl %TLS% -sS -u "%APIM_USER%:%APIM_PASS%" -H "Content-Type: application/json" --data-binary @dcr_payload.json "%DCR_URL%" -o dcr.json
+        if errorlevel 1 (
+          echo ERROR: DCR fallo
+          type dcr.json
+          exit /b 1
+        )
 
-        powershell -NoProfile -Command "(Get-Content dcr.json -Raw | ConvertFrom-Json).clientId" > client_id.txt
-        powershell -NoProfile -Command "(Get-Content dcr.json -Raw | ConvertFrom-Json).clientSecret" > client_secret.txt
+        powershell -NoProfile -Command "try{ (Get-Content dcr.json -Raw | ConvertFrom-Json).clientId } catch { '' }" > client_id.txt
+        powershell -NoProfile -Command "try{ (Get-Content dcr.json -Raw | ConvertFrom-Json).clientSecret } catch { '' }" > client_secret.txt
         set /p CLIENT_ID=<client_id.txt
         set /p CLIENT_SECRET=<client_secret.txt
 
-        rem ----------------- TOKEN -----------------
+        if "%CLIENT_ID%"=="" (
+          echo ERROR: DCR sin clientId
+          type dcr.json
+          exit /b 1
+        )
+        if "%CLIENT_SECRET%"=="" (
+          echo ERROR: DCR sin clientSecret
+          type dcr.json
+          exit /b 1
+        )
+
+        rem ----------------- 2) TOKEN -----------------
         set "TOKEN_URL=https://%APIM_HOST%:%APIM_PORT%/oauth2/token"
+        echo TOKEN_URL: %TOKEN_URL%
+
         curl %TLS% -sS -u "%CLIENT_ID%:%CLIENT_SECRET%" -H "Content-Type: application/x-www-form-urlencoded" ^
           --data-urlencode "grant_type=password" ^
           --data-urlencode "username=%APIM_USER%" ^
           --data-urlencode "password=%APIM_PASS%" ^
           --data-urlencode "scope=apim:api_view apim:api_create apim:api_manage" ^
-          "%TOKEN_URL%" -o apim_token.json || ( type apim_token.json & exit /b 1 )
+          "%TOKEN_URL%" -o apim_token.json
 
-        powershell -NoProfile -Command "(Get-Content apim_token.json -Raw | ConvertFrom-Json).access_token" > token.txt
+        if errorlevel 1 (
+          echo ERROR: token fallo
+          type apim_token.json
+          exit /b 1
+        )
+
+        powershell -NoProfile -Command "try{ (Get-Content apim_token.json -Raw | ConvertFrom-Json).access_token } catch { '' }" > token.txt
         set /p APIM_TOKEN=<token.txt
+
+        if "%APIM_TOKEN%"=="" (
+          echo ERROR: access_token vacio
+          type apim_token.json
+          exit /b 1
+        )
 
         echo Token obtenido (oculto).
         echo ---------------------------------------------------------
 
-        rem ----------------- IMPORT OPENAPI -----------------
+        rem ----------------- 3) Import OpenAPI (crear API) -----------------
         set "PUB_BASE=https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v4"
         set "IMPORT_URL=%PUB_BASE%/apis/import-openapi"
 
-        rem ✅ additional.json SIN BOM (robusto)
+        rem additional.json correcto SIN BOM (como objeto PS -> JSON)
         powershell -NoProfile -Command ^
-          "$json = '{\"name\":\"%API_NAME%\",\"version\":\"%API_VERSION%\",\"context\":\"%API_CONTEXT%\"}';" ^
+          "$obj = [ordered]@{ name = '%API_NAME%'; version = '%API_VERSION%'; context = '%API_CONTEXT%' };" ^
+          "$json = $obj | ConvertTo-Json -Compress;" ^
           "[System.IO.File]::WriteAllText('additional.json', $json, (New-Object System.Text.UTF8Encoding($false)))"
 
         echo --- additional.json (debug) ---
         type additional.json
+        echo.
 
         echo POST import-openapi -> %IMPORT_URL%
         curl %TLS% -sS -X POST "%IMPORT_URL%" -H "Authorization: Bearer %APIM_TOKEN%" -H "Accept: application/json" ^
@@ -229,16 +282,38 @@ stage('Publicar API desde Swagger (.car or repo)') {
 
         echo --- created_api.json (debug) ---
         type created_api.json
+        echo.
 
         powershell -NoProfile -Command "try{ (Get-Content created_api.json -Raw | ConvertFrom-Json).id } catch { '' }" > api_id.txt
         set /p API_ID=<api_id.txt
 
         if "%API_ID%"=="" (
-          echo ERROR: import-openapi no devolvio id; ver created_api.json
+          echo ERROR: import-openapi no devolvio id
           exit /b 1
         )
 
-        echo API creado. ID=%API_ID%
+        echo API creada. ID=%API_ID%
+
+        rem ----------------- 4) Update endpointConfig (PUT /apis/{apiId}) -----------------
+        rem Body sin BOM (endpointConfig)
+        powershell -NoProfile -Command ^
+          "$obj = [ordered]@{ endpointConfig = [ordered]@{ endpoint_type='http'; production_endpoints=@{url='%BACKEND_URL%'}; sandbox_endpoints=@{url='%BACKEND_URL%'} } };" ^
+          "$json = $obj | ConvertTo-Json -Compress;" ^
+          "[System.IO.File]::WriteAllText('update_body.json', $json, (New-Object System.Text.UTF8Encoding($false)))"
+
+        echo PUT update endpoint -> %PUB_BASE%/apis/%API_ID%
+        curl %TLS% -sS -X PUT "%PUB_BASE%/apis/%API_ID%" -H "Authorization: Bearer %APIM_TOKEN%" -H "Content-Type: application/json" -d @update_body.json -o update_api_result.json
+
+        if errorlevel 1 (
+          echo ERROR: fallo update endpoint
+          type update_api_result.json
+          exit /b 1
+        )
+
+        echo Endpoint actualizado OK.
+        echo ---------------------------------------------------------
+        echo FIN STAGE APIM. API_ID=%API_ID%
+        echo ---------------------------------------------------------
         exit /b 0
       '''
     }
