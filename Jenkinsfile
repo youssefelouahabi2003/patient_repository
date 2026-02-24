@@ -218,7 +218,9 @@ pipeline {
 
         rem ---- 3) Buscar API existente (GET /apis = getAllAPIs) ----
         set "PUB_BASE=https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v4"
-        set "LIST_URL=%PUB_BASE%/apis?query=name:%API_NAME%20version:%API_VERSION%"
+
+        rem FIX: en CMD, %20 se interpreta como %2 + 0; hay que poner %%20 para que salga %20 literal
+        set "LIST_URL=%PUB_BASE%/apis?query=name:%API_NAME%%20version:%API_VERSION%"
 
         echo ------------------------------------------
         echo 3) Buscar API existente (GET /apis)
@@ -230,7 +232,7 @@ pipeline {
           -H "Accept: application/json" ^
           "%LIST_URL%" -o apis.json
 
-        rem Extraer API_ID de forma segura
+        rem Extraer API_ID
         for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$obj=(Get-Content apis.json -Raw|ConvertFrom-Json); if($obj.count -gt 0){$obj.list[0].id}else{''}"`) do set "API_ID=%%I"
 
         if "%API_ID%"=="" (
