@@ -129,17 +129,16 @@ pipeline {
       }
     }
 
-stage('Publicar/Actualizar API en WSO2 API Manager (simple - sin DCR)') {
+stage('Publicar API desde Swagger (.car or repo)') {
   steps {
     withCredentials([
-      usernamePassword(credentialsId: 'APIM_OAUTH_APP', usernameVariable: 'APIM_CLIENT_ID', passwordVariable: 'APIM_CLIENT_SECRET'),
-      usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS') // si aún necesitas user para provider/context; opcional
+      usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')
     ]) {
       bat '''
         @echo off
         setlocal enabledelayedexpansion
 
-        rem ---------- Config ----------
+        rem ----------------- Config -----------------
         set "APIM_HOST=localhost"
         set "APIM_PORT=9443"
 
@@ -147,79 +146,181 @@ stage('Publicar/Actualizar API en WSO2 API Manager (simple - sin DCR)') {
         set "API_VERSION=1.0.0"
         set "API_CONTEXT=/pepedoctor"
 
-        set "OAS_FILE=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
+        rem Ruta swagger en repo (fallback)
+        set "REPO_OAS=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
+
+        rem Carpeta temporal para extraer car
+        set "CAR_EXTRACT=%WORKSPACE%\\car_extract"
+
+        rem TLS insecure local
+        set "TLS=-k"
+
+        echo ---------------------------------------------------------
+        echo 0) Buscar swagger: preferencia .car -> si no, fichero del repo
+        echo ---------------------------------------------------------
+
+        rem Buscar .car en target
+        set "CAR_FILE="
+        for %%F in ("%WORKSPACE%\\target\\*.car") do (
+          if exist "%%F" set "CAR_FILE=%%F"
+        )
+
+        if defined CAR_FILE (
+          echo .car encontrado: %CAR_FILE%
+          rem limpiar/extraer
+          if exist "%CAR_EXTRACT%" rd /s /q "%CAR_EXTRACT%"
+          powershell -NoProfile -Command "Expand-Archive -Force -Path '%CAR_FILE%' -DestinationPath '%CAR_EXTRACT%';"
+
+          rem buscar primer swagger/openapi dentro de car_extract
+          powershell -NoProfile -Command ^
+            " $f = Get-ChildItem -Path '%CAR_EXTRACT%' -Recurse -Include '*.yaml','*.yml','*.json' | Select-Object -First 1; if($f) { $f.FullName }" > swagger_path.txt 2>nul
+
+          set /p FOUND_SWAGGER=<swagger_path.txt
+          if defined FOUND_SWAGGER (
+            set "OAS_FILE=%FOUND_SWAGGER%"
+            echo Swagger dentro de .car: %OAS_FILE%
+          ) else (
+            echo No se encontro swagger dentro del .car.
+            set "OAS_FILE=%REPO_OAS%"
+          )
+        ) else (
+          echo No existe .car en target, usaremos el swagger del repo.
+          set "OAS_FILE=%REPO_OAS%"
+        )
+
+        rem verificar OAS_FILE
         if not exist "%OAS_FILE%" (
-          echo ERROR: No existe el swagger/openapi en %OAS_FILE%
+          echo ERROR: No se encontro ningun swagger en .car ni en repo: %OAS_FILE%
           exit /b 1
         )
 
-        rem Permitir TLS self-signed en local
-        set "TLS=-k"
+        echo Usando OpenAPI/Swagger: %OAS_FILE%
+        echo ---------------------------------------------------------
 
-        rem ---------- 1) Obtener token (password grant) usando clientId/clientSecret guardados en Jenkins ----------
+        rem ----------------- DCR (crear OAuth client) -----------------
+        set "DCR_URL=https://%APIM_HOST%:%APIM_PORT%/client-registration/v0.17/register"
+        echo DCR_URL: %DCR_URL%
+
+        rem crear json seguro con PowerShell para evitar problemas de quoting
+        powershell -NoProfile -Command ^
+          "$o=@{callbackUrl='http://localhost';clientName='jenkins_publisher_api';tokenScope='Production';owner=$env:APIM_USER;grantType='password refresh_token';saasApp=$true};" ^
+          "$o | ConvertTo-Json -Compress > dcr_payload.json"
+
+        curl %TLS% -sS -u "%APIM_USER%:%APIM_PASS%" -H "Content-Type: application/json" --data-binary @dcr_payload.json "%DCR_URL%" -o dcr.json
+        if errorlevel 1 (
+          echo ERROR: DCR curl fallo; ver dcr.json
+          type dcr.json
+          exit /b 1
+        )
+
+        powershell -NoProfile -Command "ConvertFrom-Json (Get-Content dcr.json -Raw) | Select-Object -ExpandProperty clientId" > client_id.txt
+        powershell -NoProfile -Command "ConvertFrom-Json (Get-Content dcr.json -Raw) | Select-Object -ExpandProperty clientSecret" > client_secret.txt
+
+        set /p CLIENT_ID=<client_id.txt
+        set /p CLIENT_SECRET=<client_secret.txt
+
+        if "%CLIENT_ID%"=="" (
+          echo ERROR: DCR sin clientId. Ver dcr.json
+          type dcr.json
+          exit /b 1
+        )
+        if "%CLIENT_SECRET%"=="" (
+          echo ERROR: DCR sin clientSecret. Ver dcr.json
+          type dcr.json
+          exit /b 1
+        )
+
+        echo DCR OK. clientId y secret obtenidos.
+
+        rem ----------------- Obtener token (password grant) -----------------
         set "TOKEN_URL=https://%APIM_HOST%:%APIM_PORT%/oauth2/token"
-        echo Obteniendo token en %TOKEN_URL%
+        echo TOKEN_URL: %TOKEN_URL%
 
-        rem Usamos --data-urlencode para no tener que lidiar con & en cmd
-        curl %TLS% -sS -u "%APIM_CLIENT_ID%:%APIM_CLIENT_SECRET%" ^
-          -H "Content-Type: application/x-www-form-urlencoded" ^
+        rem usamos --data-urlencode para evitar problemas con ampersands en cmd
+        curl %TLS% -sS -u "%CLIENT_ID%:%CLIENT_SECRET%" -H "Content-Type: application/x-www-form-urlencoded" ^
           --data-urlencode "grant_type=password" ^
           --data-urlencode "username=%APIM_USER%" ^
           --data-urlencode "password=%APIM_PASS%" ^
           --data-urlencode "scope=apim:api_view apim:api_create apim:api_manage" ^
-          "%TOKEN_URL%" -o apim_token.json || ( type apim_token.json & exit /b 1 )
+          "%TOKEN_URL%" -o apim_token.json
+
+        if errorlevel 1 (
+          echo ERROR: token curl fallo; ver apim_token.json
+          type apim_token.json
+          exit /b 1
+        )
 
         powershell -NoProfile -Command "ConvertFrom-Json (Get-Content apim_token.json -Raw) | Select-Object -ExpandProperty access_token" > token.txt
         set /p APIM_TOKEN=<token.txt
 
         if "%APIM_TOKEN%"=="" (
-          echo ERROR: No se obtuvo access_token:
+          echo ERROR: no access_token; ver apim_token.json
           type apim_token.json
           exit /b 1
         )
 
-        echo TOKEN obtenido (se muestra por petición tuya):
-        echo %APIM_TOKEN%
-        echo ------------------------------------------
+        echo Token obtenido (oculto).
+        echo ---------------------------------------------------------
 
-        rem ---------- 2) Buscar API existente ----------
+        rem ----------------- Buscar API existente -----------------
         set "PUB_BASE=https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v4"
-        set "LIST_URL=%PUB_BASE%/apis?query=name:%API_NAME%%%20version:%API_VERSION%"
-        echo LIST_URL: %LIST_URL%
+        rem construir query (usar delayed expansion y %%20 para espacio)
+        setlocal enabledelayedexpansion
+        set "LIST_URL=%PUB_BASE%/apis?query=name:!API_NAME!%%20version:!API_VERSION!"
+        endlocal & set "LIST_URL=%LIST_URL%"
 
+        echo LIST_URL: %LIST_URL%
         curl %TLS% -sS -H "Authorization: Bearer %APIM_TOKEN%" -H "Accept: application/json" "%LIST_URL%" -o apis.json || ( type apis.json & rem continue )
 
-        powershell -NoProfile -Command "try{ $j=ConvertFrom-Json (Get-Content apis.json -Raw); if($j -and $j.list -and $j.list.Count -gt 0){ $j.list[0].id } } catch { '' }" > api_id.txt
+        rem Extraer api id (si existe)
+        powershell -NoProfile -Command "try { $j=ConvertFrom-Json (Get-Content apis.json -Raw); if($j -and $j.list -and $j.list.Count -gt 0){ $j.list[0].id } } catch { '' }" > api_id.txt
         set /p API_ID=<api_id.txt
 
-        rem ---------- 3) Crear o actualizar ----------
         if "%API_ID%"=="" (
-          echo No existe el API. Se creara.
+          echo API NO existe -> CREANDO via import-openapi
           set "IMPORT_URL=%PUB_BASE%/apis/import-openapi"
+
+          rem preparar endpointCfg y additionalProperties (endpointConfig debe ser string JSON)
           set "ENDPOINTCFG={\"endpoint_type\":\"http\",\"sandbox_endpoints\":{\"url\":\"http://localhost:8290\"},\"production_endpoints\":{\"url\":\"http://localhost:8290\"}}"
           set "ADDITIONAL={\"name\":\"%API_NAME%\",\"version\":\"%API_VERSION%\",\"context\":\"%API_CONTEXT%\",\"endpointConfig\":\"%ENDPOINTCFG%\"}"
 
+          echo POST import-openapi -> %IMPORT_URL%
           curl %TLS% -sS -X POST "%IMPORT_URL%" -H "Authorization: Bearer %APIM_TOKEN%" -H "Accept: application/json" ^
             -F "file=@%OAS_FILE%" ^
-            -F "additionalProperties=%ADDITIONAL%" -o created_api.json || ( type created_api.json & exit /b 1 )
+            -F "additionalProperties=%ADDITIONAL%" -o created_api.json
+
+          if errorlevel 1 (
+            echo ERROR: import-openapi fallo; ver created_api.json
+            type created_api.json
+            exit /b 1
+          )
 
           powershell -NoProfile -Command "ConvertFrom-Json (Get-Content created_api.json -Raw) | Select-Object -ExpandProperty id" > api_id2.txt
           set /p API_ID=<api_id2.txt
 
           if "%API_ID%"=="" (
-            echo ERROR: import-openapi no devolvio id:
+            echo ERROR: import-openapi no devolvio id; ver created_api.json
             type created_api.json
             exit /b 1
           )
           echo API creado. ID=%API_ID%
         ) else (
-          echo API encontrado. ID=%API_ID% -> actualizando swagger...
+          echo API existe. ID=%API_ID% -> Actualizando swagger
           set "SWAGGER_URL=%PUB_BASE%/apis/%API_ID%/swagger"
-          curl %TLS% -sS -X PUT "%SWAGGER_URL%" -H "Authorization: Bearer %APIM_TOKEN%" -F "file=@%OAS_FILE%" -o swagger_update.json || ( type swagger_update.json & exit /b 1 )
-          echo Swagger actualizado.
+
+          curl %TLS% -sS -X PUT "%SWAGGER_URL%" -H "Authorization: Bearer %APIM_TOKEN%" -F "file=@%OAS_FILE%" -o swagger_update.json
+
+          if errorlevel 1 (
+            echo ERROR: fallo update swagger; ver swagger_update.json
+            type swagger_update.json
+            exit /b 1
+          )
+          echo Swagger actualizado OK.
         )
 
-        echo FIN APIM stage. API_ID=%API_ID%
+        echo ---------------------------------------------------------
+        echo FIN STAGE APIM. API_ID=%API_ID%
+        echo ---------------------------------------------------------
         exit /b 0
       '''
     }
