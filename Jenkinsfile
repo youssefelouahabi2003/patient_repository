@@ -134,7 +134,7 @@ pipeline {
     withCredentials([
       usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')
     ]) {
-      bat """
+      bat '''
         @echo off
         setlocal enabledelayedexpansion
 
@@ -153,14 +153,14 @@ pipeline {
         rem ====== Swagger/OpenAPI (ruta fija en tu repo) ======
         set "OAS_FILE=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
 
-        if not exist "!OAS_FILE!" (
+        if not exist "%OAS_FILE%" (
           echo ERROR: No existe el swagger/openapi en:
-          echo   !OAS_FILE!
+          echo   %OAS_FILE%
           exit /b 1
         )
 
         echo Usando definicion OpenAPI/Swagger:
-        echo   !OAS_FILE!
+        echo   %OAS_FILE%
 
         rem Cert TLS self-signed en local
         set "TLS=-k"
@@ -177,7 +177,7 @@ pipeline {
 
         curl %TLS% -sS -u "%APIM_USER%:%APIM_PASS%" ^
           -H "Content-Type: application/json" ^
-          -d "!DCR_PAYLOAD!" ^
+          -d "%DCR_PAYLOAD%" ^
           "%DCR_URL%" -o dcr.json
 
         for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-Content dcr.json -Raw | ConvertFrom-Json).clientId"`) do set "CLIENT_ID=%%I"
@@ -230,8 +230,8 @@ pipeline {
           -H "Accept: application/json" ^
           "%LIST_URL%" -o apis.json
 
-        rem FIX: escapar $ para que Groovy no intente interpretar variables de PowerShell
-        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "^$obj=(Get-Content apis.json -Raw|ConvertFrom-Json); if(^$obj.count -gt 0){^$obj.list[0].id}else{''}"`) do set "API_ID=%%I"
+        rem Extraer API_ID de forma segura
+        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$obj=(Get-Content apis.json -Raw|ConvertFrom-Json); if($obj.count -gt 0){$obj.list[0].id}else{''}"`) do set "API_ID=%%I"
 
         if "%API_ID%"=="" (
           echo No existe el API en APIM: %API_NAME% %API_VERSION% (se creara).
@@ -257,8 +257,8 @@ pipeline {
         curl %TLS% -f -sS -X POST "%IMPORT_URL%" ^
           -H "Authorization: Bearer %APIM_TOKEN%" ^
           -H "Accept: application/json" ^
-          -F "file=@!OAS_FILE!" ^
-          -F "additionalProperties=!ADDITIONAL!" ^
+          -F "file=@%OAS_FILE%" ^
+          -F "additionalProperties=%ADDITIONAL%" ^
           -o created_api.json
 
         if errorlevel 1 (
@@ -289,7 +289,7 @@ pipeline {
         curl %TLS% -f -sS -X PUT "%SWAGGER_URL%" ^
           -H "Authorization: Bearer %APIM_TOKEN%" ^
           -H "Accept: application/json" ^
-          -F "file=@!OAS_FILE!" ^
+          -F "file=@%OAS_FILE%" ^
           -o swagger_update.json
 
         if errorlevel 1 (
@@ -299,14 +299,13 @@ pipeline {
         )
 
         echo Swagger actualizado OK para API_ID=%API_ID%
-        goto done
 
         :done
         echo ------------------------------------------
         echo APIM OK. API_ID=%API_ID%
         echo ------------------------------------------
         exit /b 0
-      """
+      '''
     }
   }
 }
