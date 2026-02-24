@@ -142,7 +142,7 @@ pipeline {
         set "APIM_HOST=localhost"
         set "APIM_PORT=9443"
 
-        rem ====== Datos del API (los que me pediste) ======
+        rem ====== Datos del API ======
         set "API_NAME=pepeprueba"
         set "API_VERSION=1.0.0"
         set "API_CONTEXT=/pepedoctor"
@@ -230,7 +230,8 @@ pipeline {
           -H "Accept: application/json" ^
           "%LIST_URL%" -o apis.json
 
-        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$j=(Get-Content apis.json -Raw|ConvertFrom-Json); if($j.count -gt 0){$j.list[0].id}else{''}"`) do set "API_ID=%%I"
+        rem FIX: escapar $ para que Groovy no intente interpretar variables de PowerShell
+        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "^$obj=(Get-Content apis.json -Raw|ConvertFrom-Json); if(^$obj.count -gt 0){^$obj.list[0].id}else{''}"`) do set "API_ID=%%I"
 
         if "%API_ID%"=="" (
           echo No existe el API en APIM: %API_NAME% %API_VERSION% (se creara).
