@@ -9,26 +9,7 @@ pipeline {
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
 
-    // APIM: por defecto localhost (tal y como pediste)
-    string(name: 'APIM_HOST', defaultValue: 'localhost', description: 'Host API Manager', trim: true)
-    string(name: 'APIM_PORT', defaultValue: '9443', description: 'Puerto API Manager', trim: true)
 
-    // Opcionales para publicar automáticamente
-    string(name: 'API_NAME', defaultValue: '', description: 'Nombre de la API (opcional para publish automático)', trim: true)
-    string(name: 'API_VERSION', defaultValue: '', description: 'Versión de la API (opcional para publish automático)', trim: true)
-  }
-
-  environment {
-    MI_HOST         = "${params.MI_HOST ?: 'localhost'}"
-    MI_MGMT_PORT    = "${params.MI_MGMT_PORT ?: '9164'}"
-    MI_TLS_INSEGURO = "${params.MI_TLS_INSEGURO}"
-    MI_RUNTIME_PORT = "${params.MI_RUNTIME_PORT ?: '8290'}"
-    HEALTH_PATH     = "${params.HEALTH_PATH ?: '/patients/'}"
-
-    APIM_HOST       = "${params.APIM_HOST ?: 'localhost'}"
-    APIM_PORT       = "${params.APIM_PORT ?: '9443'}"
-    API_NAME        = "${params.API_NAME ?: ''}"
-    API_VERSION     = "${params.API_VERSION ?: ''}"
   }
 
   options {
@@ -47,40 +28,35 @@ pipeline {
 
     stage('Build (Maven)') {
       steps {
-        bat '''
-          @echo off
-          mvn -B -DskipTests clean package
-        '''
+        bat 'mvn -B -DskipTests clean package'
       }
     }
 
-   stage('Verificar .car') {
-  steps {
-    bat '''
-      @echo off
-      if exist target\\*.car (
-        echo CARs encontrados:
-        dir /B target\\*.car
-      ) else (
-        echo ERROR: No se generó ningún .car en target\\
-        exit /b 1
-      )
-    '''
-  }
-}
+    stage('Verificar .car') {
+      steps {
+        bat """
+          @echo off
+          if exist target\\*.car (
+            echo CARs encontrados:
+            dir /B target\\*.car
+          ) else (
+            echo ERROR: No se generó ningún .car en target\\
+            exit /b 1
+          )
+        """
+      }
+    }
 
-    // ===== Stage Despliegue en Micro Integrator: SIN TOCAR la lógica funcional =====
     stage('Desplegar en Micro Integrator (Windows)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
-          bat '''
+          bat """
             @echo off
-            REM -- asignar vars desde environment --
-            set "MI_HOST=%MI_HOST%"
-            set "MI_MGMT_PORT=%MI_MGMT_PORT%"
+            REM -- asignar vars --
+            set "MI_HOST=${params.MI_HOST}"
+            set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
             set "MI_USER=%MI_USER%"
             set "MI_PASS=%MI_PASS%"
-            set "MI_TLS_INSEGURO=%MI_TLS_INSEGURO%"
 
             if "%MI_HOST%"=="" (
               echo ERROR: MI_HOST vacio
@@ -101,10 +77,10 @@ pipeline {
             echo ------------------------------------------
 
             rem Obtener JWT (AccessToken)
-            if "%MI_TLS_INSEGURO%"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\nHTTP_STATUS=%{http_code}\n"
+            if "${params.MI_TLS_INSEGURO}"=="true" (
+              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
             ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\nHTTP_STATUS=%{http_code}\n"
+              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
             )
 
             type login.json
@@ -126,18 +102,18 @@ pipeline {
             for %%F in ("%WORKSPACE%\\target\\*.car") do (
               echo Subiendo: %%~nxF
 
-              if "%MI_TLS_INSEGURO%"=="true" (
+              if "${params.MI_TLS_INSEGURO}"=="true" (
                 curl -k -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  -w "\nHTTP_STATUS=%%{http_code}\n"
+                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
               ) else (
                 curl -f -sS -X POST "%APPS%" ^
                   -H "Authorization: Bearer %TOKEN%" ^
                   -H "Accept: application/json" ^
                   -F "file=@%%F" ^
-                  -w "\nHTTP_STATUS=%%{http_code}\n"
+                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
               )
 
               if errorlevel 1 (
@@ -148,210 +124,17 @@ pipeline {
 
             echo Despliegue por API completado.
             exit /b 0
-          '''
+          """
         }
       }
     }
 
-    // ===== Stage APIM: escribir script .cmd, ejecutarlo con diagnósticos y limpiar temporales =====
-    stage('Publicar en API Manager (Windows)') {
-      steps {
-        script {
-          // Ruta dentro del repo donde está tu swagger
-          def oasRelative = 'src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml'
-          def oasPath = "${env.WORKSPACE}\\${oasRelative}"
-          if (!fileExists(oasPath)) {
-            echo "Aviso: no se encuentra ${oasPath}. Se omite publicación en APIM."
-            return
-          }
-
-          // Contenido del script .cmd que ejecutará la lógica apictl / fallback REST
-          def scriptContent = '''
-@echo off
-setlocal
-
-set "APIM_HOST=%APIM_HOST%"
-set "APIM_PORT=%APIM_PORT%"
-set "APIM_USER=%APIM_USER%"
-set "APIM_PASS=%APIM_PASS%"
-set "API_NAME=%API_NAME%"
-set "API_VERSION=%API_VERSION%"
-set "OAS_FILE=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
-
-echo ------------------------------------------
-echo Publicación en API Manager - inicio
-echo APIM host: %APIM_HOST%:%APIM_PORT%
-echo OAS: %OAS_FILE%
-echo ------------------------------------------
-
-rem 1) comprobar si apictl está instalado
-where apictl > NUL 2> NUL
-if errorlevel 1 (
-  echo apictl NO encontrado -> fallback REST import
-  set "USE_APICTL=0"
-) else (
-  echo apictl encontrado
-  set "USE_APICTL=1"
-)
-
-echo [DEBUG] USE_APICTL=%USE_APICTL%
-
-rem 2) si apictl disponible -> comprobar/añadir env 'ci' y luego intentar login+import
-if "%USE_APICTL%"=="1" (
-  echo [DEBUG] list envs
-  apictl list env > apictl_envs.txt 2>apictl_envs_err.txt
-  echo [DEBUG] contenido apictl_envs.txt:
-  if exist apictl_envs.txt type apictl_envs.txt
-
-  findstr /I /C:"ci" apictl_envs.txt >NUL
-  if errorlevel 1 (
-    echo Environment 'ci' no encontrado en apictl -> añadiendo...
-    apictl add env ci --apim "https://%APIM_HOST%:%APIM_PORT%" --username "%APIM_USER%" --password "%APIM_PASS%" --insecure > apictl_add_env_out.txt 2> apictl_add_env_err.txt
-    if errorlevel 1 (
-      echo ERROR: fallo al añadir environment 'ci' en apictl.
-      if exist apictl_add_env_err.txt type apictl_add_env_err.txt
-      echo -> Se hará fallback REST.
-      set "USE_APICTL=0"
-    ) else (
-      echo Environment 'ci' añadido correctamente.
-    )
-  ) else (
-    echo Environment 'ci' ya existe en apictl.
-  )
-
-  if "%USE_APICTL%"=="1" (
-    echo [DEBUG] Intentando apictl login...
-    apictl login ci -u "%APIM_USER%" -p "%APIM_PASS%" -k > apictl_login_out.txt 2> apictl_login_err.txt
-    if errorlevel 1 (
-      echo El sistema informó: (apictl login falló). Mostrando error:
-      if exist apictl_login_err.txt type apictl_login_err.txt
-      echo -> Haremos fallback REST.
-      set "USE_APICTL=0"
-    ) else (
-      echo apictl login OK.
-
-      echo [DEBUG] Importando API con apictl (verbose)...
-      apictl import api -f "%OAS_FILE%" -e ci --update --verbose > apictl_import_out.txt 2> apictl_import_err.txt
-      if errorlevel 1 (
-        echo ERROR: apictl import api falló. Imprimiendo logs:
-        if exist apictl_import_out.txt (echo ----- STDOUT ----- & type apictl_import_out.txt)
-        if exist apictl_import_err.txt (echo ----- STDERR ----- & type apictl_import_err.txt)
-        echo -> Haremos fallback REST.
-        set "USE_APICTL=0"
-      ) else (
-        echo apictl import api OK.
-        if not "%API_NAME%"=="" (
-          if not "%API_VERSION%"=="" (
-            echo Publicando API %API_NAME% %API_VERSION% con apictl...
-            apictl change-status api -a Publish -n "%API_NAME%" -v "%API_VERSION%" -r "%APIM_USER%" -e ci > apictl_publish_out.txt 2>apictl_publish_err.txt
-            if errorlevel 1 (
-              echo ERROR: apictl change-status ha fallado.
-              if exist apictl_publish_err.txt type apictl_publish_err.txt
-              echo -> No fatal: quedará en CREATED/pending.
-            ) else (
-              echo API publicada correctamente con apictl.
-            )
-          ) else (
-            echo API_VERSION no proporcionada; salto publish.
-          )
-        ) else (
-          echo API_NAME no proporcionada; salto publish.
-        )
-      )
-    )
-  )
-)
-
-rem 3) Si USE_APICTL==0 o apictl no existe -> fallback REST
-if not "%USE_APICTL%"=="1" (
-  echo Ejecutando fallback REST import...
-  curl -k -s -o import_resp.json --write-out "%%{http_code}" -u "%APIM_USER%:%APIM_PASS%" -F "file=@%OAS_FILE%" "https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v1/apis/import-openapi" > import_status.txt 2> import_debug.txt
-
-  if exist import_status.txt (
-    set /p HTTP_CODE=<import_status.txt
-  ) else (
-    set "HTTP_CODE="
-  )
-  echo Import REST HTTP status: %HTTP_CODE%
-
-  if not "%HTTP_CODE%"=="200" if not "%HTTP_CODE%"=="201" (
-    echo ERROR: fallo importando via REST (HTTP %HTTP_CODE%)
-    if exist import_resp.json type import_resp.json
-    if exist import_debug.txt type import_debug.txt
-    exit /b 1
-  )
-  echo Import via REST completado correctamente.
-)
-
-endlocal
-'''
-
-          // escribir el script en el workspace
-          writeFile file: "${env.WORKSPACE}\\apim_deploy.cmd", text: scriptContent
-        }
-
-        // Ejecutar con credenciales y luego mostrar logs + limpiar temporales
-        withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
-          bat '''
-            @echo on
-            echo =========================
-            echo Comprobando apim_deploy.cmd en workspace...
-            echo Workspace: %WORKSPACE%
-            echo =========================
-
-            if not exist "%WORKSPACE%\\apim_deploy.cmd" (
-              echo ERROR: apim_deploy.cmd NO encontrado en %WORKSPACE%
-              echo Contenido de %WORKSPACE%:
-              dir "%WORKSPACE%"
-              exit /b 1
-            )
-
-            echo apim_deploy.cmd encontrado. Mostrando contenido (hasta 200 líneas):
-            for /f "usebackq delims=" %%L in (`type "%WORKSPACE%\\apim_deploy.cmd"`) do (
-              echo %%L
-            )
-
-            echo Ejecutando apim_deploy.cmd (cmd /c)...
-            cmd /c "%WORKSPACE%\\apim_deploy.cmd"
-            set "RC=%ERRORLEVEL%"
-            echo apim_deploy.cmd terminó con código %RC%
-
-            rem mostrar logs relevantes si existen
-            if exist "%WORKSPACE%\\apictl_import_err.txt" ( echo ----- apictl_import_err.txt ----- & type "%WORKSPACE%\\apictl_import_err.txt" )
-            if exist "%WORKSPACE%\\apictl_import_out.txt" ( echo ----- apictl_import_out.txt ----- & type "%WORKSPACE%\\apictl_import_out.txt" )
-            if exist "%WORKSPACE%\\apictl_login_err.txt" ( echo ----- apictl_login_err.txt ----- & type "%WORKSPACE%\\apictl_login_err.txt" )
-            if exist "%WORKSPACE%\\apictl_add_env_err.txt" ( echo ----- apictl_add_env_err.txt ----- & type "%WORKSPACE%\\apictl_add_env_err.txt" )
-            if exist "%WORKSPACE%\\import_resp.json" ( echo ----- import_resp.json ----- & type "%WORKSPACE%\\import_resp.json" )
-            if exist "%WORKSPACE%\\import_debug.txt" ( echo ----- import_debug.txt ----- & type "%WORKSPACE%\\import_debug.txt" )
-
-            rem LIMPIEZA: borrar ficheros temporales que creamos
-            del /Q "%WORKSPACE%\\apictl_envs.txt"             >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_envs_err.txt"         >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_add_env_out.txt"      >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_add_env_err.txt"      >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_login_out.txt"        >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_login_err.txt"        >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_import_out.txt"       >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_import_err.txt"       >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_publish_out.txt"      >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apictl_publish_err.txt"      >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\import_resp.json"            >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\import_status.txt"           >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\import_debug.txt"            >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\apim_deploy.cmd"             >nul 2>nul || echo.
-            del /Q "%WORKSPACE%\\login.json"                  >nul 2>nul || echo.
-
-            rem devolver el mismo código de retorno que el script
-            exit /b %RC%
-          '''
-        }
-      }
-    }
+  
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
       steps {
-        bat '''
+        bat """
           @echo off
           echo Esperando 10s a que MI procese el .car...
           timeout /t 10 /nobreak >nul
@@ -372,11 +155,10 @@ endlocal
           ) else (
             echo OK: respondió %URL% -> %CODE%
           )
-        '''
+        """
       }
     }
-
-  } // stages
+  }
 
   post {
     success {
@@ -384,7 +166,7 @@ endlocal
       echo 'Pipeline finalizado con éxito.'
     }
     failure {
-      echo 'Pipeline fallido. Revisa la consola para detalles.'
+      echo 'Pipeline fallido. Revisa la consola.'
     }
   }
 }
