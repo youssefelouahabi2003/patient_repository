@@ -129,7 +129,7 @@ pipeline {
       }
     }
 
-   stage('Publicar/Actualizar API en WSO2 API Manager (simple, APIM 4.3)') {
+  stage('Publicar/Actualizar API en WSO2 API Manager (simple, APIM 4.3)') {
   steps {
     withCredentials([
       usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')
