@@ -1,13 +1,11 @@
 openapi: 3.0.1
 info:
   title: MI_PATIENT
-  description: API Definition for the MI_PATIENT Synapse API
+  description: API Definition for the MI_PATIENT Synapse API (Micro Integrator)
   version: 1.0.0
 servers:
-  - url: http://localhost:8290/patientlist
-    description: Runtime HTTP endpoint (non-TLS)
-  - url: https://localhost:8253/patientlist
-    description: Runtime HTTPS endpoint (TLS)
+  - url: http://localhost:8290/pepedoctor
+  - url: https://localhost:8253/pepedoctor
 paths:
   /:
     get:
@@ -15,40 +13,45 @@ paths:
       description: Devuelve un objeto con la lista de pacientes (id, name, age, diagnosis).
       operationId: getPatients
       responses:
-        '200':
-          description: Lista de pacientes (éxito)
+        "200":
+          description: Lista de pacientes (ÃƒÆ’Ã‚Â©xito)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PatientsResponse'
+                $ref: "#/components/schemas/PatientsResponse"
               examples:
                 ejemplo-pacientes:
                   summary: Respuesta ejemplo
                   value:
                     patients:
                       - id: 1
-                        name: "Juan Pérez"
+                        name: Juan PÃƒÆ’Ã‚Â©rez
                         age: 45
-                        diagnosis: "Diabetes"
+                        diagnosis: Diabetes
                       - id: 2
-                        name: "María López"
+                        name: MarÃƒÆ’Ã‚Â­a LÃƒÆ’Ã‚Â³pez
                         age: 32
-                        diagnosis: "Hipertensión"
+                        diagnosis: HipertensiÃƒÆ’Ã‚Â³n
                       - id: 3
-                        name: "Carlos Gómez"
+                        name: Carlos GÃƒÆ’Ã‚Â³mez
                         age: 60
-                        diagnosis: "Asma"
+                        diagnosis: Asma
                       - id: 4
-                        name: "Ana Martínez"
+                        name: Ana MartÃƒÆ’Ã‚Â­nez
                         age: 27
-                        diagnosis: "Migraña"
-        '4XX':
+                        diagnosis: MigraÃƒÆ’Ã‚Â±a
+        4XX:
           description: Error de cliente
-        '5XX':
+        5XX:
           description: Error de servidor
 components:
   schemas:
     Patient:
+      required:
+        - age
+        - diagnosis
+        - id
+        - name
       type: object
       properties:
         id:
@@ -56,24 +59,19 @@ components:
           example: 1
         name:
           type: string
-          example: "Juan Pérez"
+          example: Juan PÃƒÆ’Ã‚Â©rez
         age:
           type: integer
           example: 45
         diagnosis:
           type: string
-          example: "Diabetes"
-      required:
-        - id
-        - name
-        - age
-        - diagnosis
+          example: Diabetes
     PatientsResponse:
+      required:
+        - patients
       type: object
       properties:
         patients:
           type: array
           items:
-            $ref: '#/components/schemas/Patient'
-      required:
-        - patients
+            $ref: "#/components/schemas/Patient"
