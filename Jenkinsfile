@@ -1,4 +1,7 @@
 pipeline {
+
+  agent any
+  
   parameters {
     string(name: 'MI_HOST', defaultValue: 'localhost', description: 'Host o IP donde está Micro Integrator', trim: true)
     string(name: 'MI_MGMT_PORT', defaultValue: '9164', description: 'Puerto Management API de MI', trim: true)
