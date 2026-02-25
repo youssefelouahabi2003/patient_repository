@@ -1,5 +1,5 @@
 pipeline {
-  agent any
+  agent { label 'linux' }
 
   parameters {
     string(name: 'MI_HOST', defaultValue: 'localhost', description: 'Host o IP donde está Micro Integrator', trim: true)
@@ -8,8 +8,6 @@ pipeline {
     booleanParam(name: 'COMPROBAR_HTTP', defaultValue: false, description: 'Comprobar endpoint runtime tras desplegar')
     string(name: 'MI_RUNTIME_PORT', defaultValue: '8290', description: 'Puerto runtime HTTP de MI', trim: true)
     string(name: 'HEALTH_PATH', defaultValue: '/patients/', description: 'Ruta a probar tras el despliegue', trim: true)
-
-
   }
 
   options {
@@ -19,334 +17,224 @@ pipeline {
     buildDiscarder(logRotator(daysToKeepStr: '30', numToKeepStr: '30'))
   }
 
+  environment {
+    MI_HOST = "${params.MI_HOST}"
+    MI_MGMT_PORT = "${params.MI_MGMT_PORT}"
+    MI_RUNTIME_PORT = "${params.MI_RUNTIME_PORT}"
+    HEALTH_PATH = "${params.HEALTH_PATH}"
+    MI_TLS_INSEGURO = "${params.MI_TLS_INSEGURO}"
+
+    APIM_HOST = "localhost"
+    APIM_PORT = "9443"
+    API_NAME = "pepeprueba"
+    API_VERSION = "1.0.0"
+    API_CONTEXT = "/pepedoctor"
+    BACKEND_URL = "http://localhost:8290"
+    REPO_OAS = "${WORKSPACE}/src/main/wso2mi/resources/api-definitions/HealthcareAPI1.yaml"
+    CAR_EXTRACT = "${WORKSPACE}/car_extract"
+  }
+
   stages {
     stage('Checkout') {
       steps {
-        git branch: 'main', url: 'https://github.com/youssefelouahabi2003/patient_repository.git'
+        checkout([$class: 'GitSCM', branches: [[name: 'main']], userRemoteConfigs: [[url: 'https://github.com/youssefelouahabi2003/patient_repository.git']]])
       }
     }
 
     stage('Build (Maven)') {
       steps {
-        bat 'mvn -B -DskipTests clean package'
+        sh 'mvn -B -DskipTests clean package'
       }
     }
 
     stage('Verificar .car') {
       steps {
-        bat """
-          @echo off
-          if exist target\\*.car (
-            echo CARs encontrados:
-            dir /B target\\*.car
-          ) else (
-            echo ERROR: No se generó ningún .car en target\\
-            exit /b 1
-          )
-        """
+        sh '''
+          set -e
+          echo "Buscando .car en target/ ..."
+          shopt -s nullglob
+          cars=(target/*.car)
+          if [ ${#cars[@]} -gt 0 ]; then
+            echo "CARs encontrados:"
+            for c in "${cars[@]}"; do echo "$c"; done
+          else
+            echo "ERROR: No se generó ningún .car en target/"
+            exit 1
+          fi
+        '''
       }
     }
 
-    stage('Desplegar en Micro Integrator (Windows)') {
+    stage('Desplegar en Micro Integrator (Linux)') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'MI_ADMIN', usernameVariable: 'MI_USER', passwordVariable: 'MI_PASS')]) {
-          bat """
-            @echo off
-            REM -- asignar vars --
-            set "MI_HOST=${params.MI_HOST}"
-            set "MI_MGMT_PORT=${params.MI_MGMT_PORT}"
-            set "MI_USER=%MI_USER%"
-            set "MI_PASS=%MI_PASS%"
+          sh '''
+            set -euo pipefail
 
-            if "%MI_HOST%"=="" (
-              echo ERROR: MI_HOST vacio
-              exit /b 1
-            )
-            if "%MI_MGMT_PORT%"=="" (
-              echo ERROR: MI_MGMT_PORT vacio
-              exit /b 1
-            )
+            BASE="https://${MI_HOST}:${MI_MGMT_PORT}/management"
+            LOGIN="${BASE}/login"
+            APPS="${BASE}/applications"
 
-            set "BASE=https://%MI_HOST%:%MI_MGMT_PORT%/management"
-            set "LOGIN=%BASE%/login"
-            set "APPS=%BASE%/applications"
+            if [ "${MI_TLS_INSEGURO}" = "true" ]; then CURL_TLS_OPT="-k"; else CURL_TLS_OPT=""; fi
 
-            echo ------------------------------------------
-            echo 1) Login para obtener JWT
-            echo LOGIN: %LOGIN%
-            echo ------------------------------------------
+            echo "1) Login MI -> ${LOGIN}"
+            curl ${CURL_TLS_OPT} -sS -u "${MI_USER}:${MI_PASS}" "${LOGIN}" -o login.json || (cat login.json || true; echo "ERROR: fallo login MI"; exit 1)
 
-            rem Obtener JWT (AccessToken)
-            if "${params.MI_TLS_INSEGURO}"=="true" (
-              curl -k -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
-            ) else (
-              curl -sS -u "%MI_USER%:%MI_PASS%" "%LOGIN%" -o login.json -w "\\nHTTP_STATUS=%{http_code}\\n"
-            )
+            # Extraer AccessToken con sed (busca "AccessToken":"...") - tolerante a espacios
+            MI_TOKEN=$(sed -n 's/.*"AccessToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' login.json || true)
+            if [ -z "${MI_TOKEN}" ]; then
+              echo "ERROR: no se obtuvo AccessToken de MI. login.json:"
+              sed -n '1,200p' login.json || true
+              exit 1
+            fi
+            echo "Token MI (preview): ${MI_TOKEN:0:40}..."
 
-            type login.json
+            # Subir cada .car
+            for car in target/*.car; do
+              echo "Subiendo: ${car}"
+              curl ${CURL_TLS_OPT} -f -sS -X POST "${APPS}" \
+                -H "Authorization: Bearer ${MI_TOKEN}" \
+                -H "Accept: application/json" \
+                -F "file=@${car}" -o mi_deploy_resp.json || ( echo "ERROR: fallo subiendo ${car}"; cat mi_deploy_resp.json || true; exit 1 )
+              echo "Respuesta MI upload (preview):"
+              sed -n '1,200p' mi_deploy_resp.json || true
+            done
 
-            rem Extraer AccessToken con PowerShell
-            for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Content login.json -Raw | ConvertFrom-Json).AccessToken"`) do set "TOKEN=%%T"
-
-            if "%TOKEN%"=="" (
-              echo ERROR: No se pudo obtener token. Revisa usuario/pass o config de MI.
-              exit /b 1
-            )
-
-            echo Token obtenido (oculto).
-            echo ------------------------------------------
-            echo 2) Subir .car usando Bearer token
-            echo APPS: %APPS%
-            echo ------------------------------------------
-
-            for %%F in ("%WORKSPACE%\\target\\*.car") do (
-              echo Subiendo: %%~nxF
-
-              if "${params.MI_TLS_INSEGURO}"=="true" (
-                curl -k -f -sS -X POST "%APPS%" ^
-                  -H "Authorization: Bearer %TOKEN%" ^
-                  -H "Accept: application/json" ^
-                  -F "file=@%%F" ^
-                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
-              ) else (
-                curl -f -sS -X POST "%APPS%" ^
-                  -H "Authorization: Bearer %TOKEN%" ^
-                  -H "Accept: application/json" ^
-                  -F "file=@%%F" ^
-                  -w "\\nHTTP_STATUS=%%{http_code}\\n"
-              )
-
-              if errorlevel 1 (
-                echo ERROR: fallo subiendo %%~nxF
-                exit /b 1
-              )
-            )
-
-            echo Despliegue por API completado.
-            exit /b 0
-          """
+            echo "Despliegue MI completado."
+          '''
         }
       }
     }
 
-stage('Publicar API desde Swagger (.car or repo)') {
-  steps {
-    withCredentials([
-      usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')
-    ]) {
-      bat '''
-        @echo off
-        setlocal
+    stage('Publicar API desde Swagger (.car or repo)') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'APIM_ADMIN', usernameVariable: 'APIM_USER', passwordVariable: 'APIM_PASS')]) {
+          sh '''
+            set -euo pipefail
+            if [ "${MI_TLS_INSEGURO}" = "true" ]; then CURL_TLS_OPT="-k"; else CURL_TLS_OPT=""; fi
 
-        rem ---------- Config ----------
-        set "APIM_HOST=localhost"
-        set "APIM_PORT=9443"
+            # seleccionar swagger (.car preferido)
+            rm -rf "${CAR_EXTRACT}" || true
+            car_file=$(ls target/*.car 2>/dev/null | head -n1 || true)
+            FOUND_SWAGGER=""
+            if [ -n "${car_file}" ]; then
+              echo ".car encontrado: ${car_file}"
+              mkdir -p "${CAR_EXTRACT}"
+              unzip -q -o "${car_file}" -d "${CAR_EXTRACT}"
+              FOUND_SWAGGER=$(find "${CAR_EXTRACT}" -type f \\( -iname "*.yaml" -o -iname "*.yml" -o -iname "*.json" \\) | head -n1 || true)
+            fi
 
-        set "API_NAME=pepeprueba"
-        set "API_VERSION=1.0.0"
-        set "API_CONTEXT=/pepedoctor"
+            if [ -z "${FOUND_SWAGGER}" ]; then
+              if [ -f "${REPO_OAS}" ]; then
+                FOUND_SWAGGER="${REPO_OAS}"
+                echo "Usando swagger del repo: ${FOUND_SWAGGER}"
+              else
+                echo "ERROR: No se encontró swagger en .car ni en repo (${REPO_OAS})"
+                exit 1
+              fi
+            else
+              echo "Swagger desde .car: ${FOUND_SWAGGER}"
+            fi
 
-        rem Backend MI
-        set "BACKEND_URL=http://localhost:8290"
+            # 1) DCR
+            DCR_URL="https://${APIM_HOST}:${APIM_PORT}/client-registration/v0.17/register"
+            echo "DCR_URL: ${DCR_URL}"
+            # crear payload minimal sin BOM
+            printf '%s' '{"callbackUrl":"http://localhost","clientName":"jenkins_publisher_api","tokenScope":"Production","owner":"'${APIM_USER}'","grantType":"password refresh_token","saasApp":true}' > dcr_payload.json
 
-        rem Ruta swagger en repo (fallback)
-        set "REPO_OAS=%WORKSPACE%\\src\\main\\wso2mi\\resources\\api-definitions\\HealthcareAPI1.yaml"
+            curl ${CURL_TLS_OPT} -sS -u "${APIM_USER}:${APIM_PASS}" -H "Content-Type: application/json" --data-binary @dcr_payload.json "${DCR_URL}" -o dcr.json || ( echo "ERROR: DCR fallo"; cat dcr.json || true; exit 1 )
 
-        rem Carpeta temporal para extraer car
-        set "CAR_EXTRACT=%WORKSPACE%\\car_extract"
+            CLIENT_ID=$(sed -n 's/.*"clientId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dcr.json || true)
+            CLIENT_SECRET=$(sed -n 's/.*"clientSecret"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dcr.json || true)
 
-        rem TLS insecure local
-        set "TLS=-k"
+            if [ -z "${CLIENT_ID}" ] || [ -z "${CLIENT_SECRET}" ]; then
+              echo "ERROR: DCR no devolvió clientId/clientSecret:"
+              sed -n '1,200p' dcr.json || true
+              exit 1
+            fi
+            echo "DCR OK (clientId preview): ${CLIENT_ID:0:8}..."
 
-        echo ---------------------------------------------------------
-        echo 0) Buscar swagger: preferencia .car -> si no, fichero del repo
-        echo ---------------------------------------------------------
+            # 2) Token OAuth2 (password grant)
+            TOKEN_URL="https://${APIM_HOST}:${APIM_PORT}/oauth2/token"
+            echo "TOKEN_URL: ${TOKEN_URL}"
+            curl ${CURL_TLS_OPT} -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" -H "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "grant_type=password" \
+              --data-urlencode "username=${APIM_USER}" \
+              --data-urlencode "password=${APIM_PASS}" \
+              --data-urlencode "scope=apim:api_view apim:api_create apim:api_manage" \
+              "${TOKEN_URL}" -o apim_token.json || ( echo "ERROR: token fallo"; cat apim_token.json || true; exit 1 )
 
-        rem Buscar primer .car en target
-        powershell -NoProfile -Command ^
-          "$car = Get-ChildItem -Path '%WORKSPACE%\\target' -Filter '*.car' -ErrorAction SilentlyContinue | Select-Object -First 1; if($car){ $car.FullName }" > car_found.txt
+            APIM_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]]*\)".*/\1/p' apim_token.json || true)
+            if [ -z "${APIM_TOKEN}" ]; then
+              echo "ERROR: access_token vacio"
+              sed -n '1,200p' apim_token.json || true
+              exit 1
+            fi
+            echo "Token APIM obtenido (preview): ${APIM_TOKEN:0:40}..."
 
-        set "CAR_FILE="
-        if exist car_found.txt (
-          set /p CAR_FILE=<car_found.txt
-        )
+            # 3) Import OpenAPI (crear API)
+            PUB_BASE="https://${APIM_HOST}:${APIM_PORT}/api/am/publisher/v4"
+            IMPORT_URL="${PUB_BASE}/apis/import-openapi"
 
-        set "FOUND_SWAGGER="
-        if defined CAR_FILE (
-          echo .car encontrado: %CAR_FILE%
-          if exist "%CAR_EXTRACT%" rd /s /q "%CAR_EXTRACT%"
-          powershell -NoProfile -Command "Expand-Archive -Force -Path '%CAR_FILE%' -DestinationPath '%CAR_EXTRACT%';"
-          powershell -NoProfile -Command ^
-            "$f = Get-ChildItem -Path '%CAR_EXTRACT%' -Recurse -Include '*.yaml','*.yml','*.json' -ErrorAction SilentlyContinue | Select-Object -First 1; if($f){ $f.FullName }" > swagger_path.txt
-          if exist swagger_path.txt (
-            set /p FOUND_SWAGGER=<swagger_path.txt
-          )
-        )
+            printf '%s' '{"name":"'"${API_NAME}"'","version":"'"${API_VERSION}"'","context":"'"${API_CONTEXT}"'"}' > additional.json
+            echo "--- additional.json (debug) ---"
+            cat additional.json || true
+            echo
 
-        if defined FOUND_SWAGGER (
-          set "OAS_FILE=%FOUND_SWAGGER%"
-          echo Swagger dentro de .car: %OAS_FILE%
-        ) else (
-          set "OAS_FILE=%REPO_OAS%"
-          echo Usando swagger del repo: %OAS_FILE%
-        )
+            echo "POST import-openapi -> ${IMPORT_URL}"
+            curl ${CURL_TLS_OPT} -sS -X POST "${IMPORT_URL}" -H "Authorization: Bearer ${APIM_TOKEN}" -H "Accept: application/json" \
+              -F "file=@${FOUND_SWAGGER}" -F "additionalProperties=@additional.json" -o created_api.json || true
 
-        if not exist "%OAS_FILE%" (
-          echo ERROR: No existe swagger: %OAS_FILE%
-          exit /b 1
-        )
+            echo "--- created_api.json (debug) ---"
+            sed -n '1,200p' created_api.json || true
+            echo
 
-        echo Usando OpenAPI/Swagger: %OAS_FILE%
-        echo ---------------------------------------------------------
+            API_ID=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' created_api.json || true)
+            if [ -z "${API_ID}" ]; then
+              echo "ERROR: import-openapi no devolvió id; ver created_api.json"
+              exit 1
+            fi
+            echo "API creada. ID=${API_ID}"
 
-        rem ----------------- 1) DCR -----------------
-        set "DCR_URL=https://%APIM_HOST%:%APIM_PORT%/client-registration/v0.17/register"
-        echo DCR_URL: %DCR_URL%
+            # 4) Update endpointConfig (PUT /apis/{apiId})
+            printf '%s' '{"endpointConfig":{"endpoint_type":"http","production_endpoints":{"url":"'"${BACKEND_URL}"'"},"sandbox_endpoints":{"url":"'"${BACKEND_URL}"'"}}}' > update_body.json
 
-        rem Crear dcr_payload.json SIN BOM de forma robusta
-        powershell -NoProfile -Command ^
-          "$obj = [ordered]@{ callbackUrl='http://localhost'; clientName='jenkins_publisher_api'; tokenScope='Production'; owner=$env:APIM_USER; grantType='password refresh_token'; saasApp=$true };" ^
-          "$json = $obj | ConvertTo-Json -Compress;" ^
-          "[System.IO.File]::WriteAllText('dcr_payload.json',$json,(New-Object System.Text.UTF8Encoding($false)))"
+            echo "PUT update endpoint -> ${PUB_BASE}/apis/${API_ID}"
+            curl ${CURL_TLS_OPT} -sS -X PUT "${PUB_BASE}/apis/${API_ID}" -H "Authorization: Bearer ${APIM_TOKEN}" -H "Content-Type: application/json" -d @update_body.json -o update_api_result.json || ( echo "ERROR: fallo update endpoint"; sed -n '1,200p' update_api_result.json || true; exit 1 )
 
-        curl %TLS% -sS -u "%APIM_USER%:%APIM_PASS%" -H "Content-Type: application/json" --data-binary @dcr_payload.json "%DCR_URL%" -o dcr.json
-        if errorlevel 1 (
-          echo ERROR: DCR fallo
-          type dcr.json
-          exit /b 1
-        )
-
-        powershell -NoProfile -Command "try{ (Get-Content dcr.json -Raw | ConvertFrom-Json).clientId } catch { '' }" > client_id.txt
-        powershell -NoProfile -Command "try{ (Get-Content dcr.json -Raw | ConvertFrom-Json).clientSecret } catch { '' }" > client_secret.txt
-        set /p CLIENT_ID=<client_id.txt
-        set /p CLIENT_SECRET=<client_secret.txt
-
-        if "%CLIENT_ID%"=="" (
-          echo ERROR: DCR sin clientId
-          type dcr.json
-          exit /b 1
-        )
-        if "%CLIENT_SECRET%"=="" (
-          echo ERROR: DCR sin clientSecret
-          type dcr.json
-          exit /b 1
-        )
-
-        rem ----------------- 2) TOKEN -----------------
-        set "TOKEN_URL=https://%APIM_HOST%:%APIM_PORT%/oauth2/token"
-        echo TOKEN_URL: %TOKEN_URL%
-
-        curl %TLS% -sS -u "%CLIENT_ID%:%CLIENT_SECRET%" -H "Content-Type: application/x-www-form-urlencoded" ^
-          --data-urlencode "grant_type=password" ^
-          --data-urlencode "username=%APIM_USER%" ^
-          --data-urlencode "password=%APIM_PASS%" ^
-          --data-urlencode "scope=apim:api_view apim:api_create apim:api_manage" ^
-          "%TOKEN_URL%" -o apim_token.json
-
-        if errorlevel 1 (
-          echo ERROR: token fallo
-          type apim_token.json
-          exit /b 1
-        )
-
-        powershell -NoProfile -Command "try{ (Get-Content apim_token.json -Raw | ConvertFrom-Json).access_token } catch { '' }" > token.txt
-        set /p APIM_TOKEN=<token.txt
-
-        if "%APIM_TOKEN%"=="" (
-          echo ERROR: access_token vacio
-          type apim_token.json
-          exit /b 1
-        )
-
-        echo Token obtenido (oculto).
-        echo ---------------------------------------------------------
-
-        rem ----------------- 3) Import OpenAPI (crear API) -----------------
-        set "PUB_BASE=https://%APIM_HOST%:%APIM_PORT%/api/am/publisher/v4"
-        set "IMPORT_URL=%PUB_BASE%/apis/import-openapi"
-
-        rem additional.json correcto SIN BOM (como objeto PS -> JSON)
-        powershell -NoProfile -Command ^
-          "$obj = [ordered]@{ name = '%API_NAME%'; version = '%API_VERSION%'; context = '%API_CONTEXT%' };" ^
-          "$json = $obj | ConvertTo-Json -Compress;" ^
-          "[System.IO.File]::WriteAllText('additional.json', $json, (New-Object System.Text.UTF8Encoding($false)))"
-
-        echo --- additional.json (debug) ---
-        type additional.json
-        echo.
-
-        echo POST import-openapi -> %IMPORT_URL%
-        curl %TLS% -sS -X POST "%IMPORT_URL%" -H "Authorization: Bearer %APIM_TOKEN%" -H "Accept: application/json" ^
-          -F "file=@%OAS_FILE%" ^
-          -F "additionalProperties=@additional.json" -o created_api.json
-
-        echo --- created_api.json (debug) ---
-        type created_api.json
-        echo.
-
-        powershell -NoProfile -Command "try{ (Get-Content created_api.json -Raw | ConvertFrom-Json).id } catch { '' }" > api_id.txt
-        set /p API_ID=<api_id.txt
-
-        if "%API_ID%"=="" (
-          echo ERROR: import-openapi no devolvio id
-          exit /b 1
-        )
-
-        echo API creada. ID=%API_ID%
-
-        rem ----------------- 4) Update endpointConfig (PUT /apis/{apiId}) -----------------
-        rem Body sin BOM (endpointConfig)
-        powershell -NoProfile -Command ^
-          "$obj = [ordered]@{ endpointConfig = [ordered]@{ endpoint_type='http'; production_endpoints=@{url='%BACKEND_URL%'}; sandbox_endpoints=@{url='%BACKEND_URL%'} } };" ^
-          "$json = $obj | ConvertTo-Json -Compress;" ^
-          "[System.IO.File]::WriteAllText('update_body.json', $json, (New-Object System.Text.UTF8Encoding($false)))"
-
-        echo PUT update endpoint -> %PUB_BASE%/apis/%API_ID%
-        curl %TLS% -sS -X PUT "%PUB_BASE%/apis/%API_ID%" -H "Authorization: Bearer %APIM_TOKEN%" -H "Content-Type: application/json" -d @update_body.json -o update_api_result.json
-
-        if errorlevel 1 (
-          echo ERROR: fallo update endpoint
-          type update_api_result.json
-          exit /b 1
-        )
-
-        echo Endpoint actualizado OK.
-        echo ---------------------------------------------------------
-        echo FIN STAGE APIM. API_ID=%API_ID%
-        echo ---------------------------------------------------------
-        exit /b 0
-      '''
+            echo "Endpoint actualizado OK."
+          '''
+        }
+      }
     }
-  }
-}
-
-  
 
     stage('Comprobación HTTP (opcional)') {
       when { expression { return params.COMPROBAR_HTTP } }
       steps {
-        bat """
-          @echo off
-          echo Esperando 10s a que MI procese el .car...
-          timeout /t 10 /nobreak >nul
-
-          set "URL=http://%MI_HOST%:%MI_RUNTIME_PORT%%HEALTH_PATH%"
-          set ATTEMPTS=12
-          set /a I=1
-          :loop
-          powershell -NoProfile -Command "(Invoke-WebRequest -UseBasicParsing -Uri '%URL%' -TimeoutSec 8).StatusCode" > status.txt 2>nul || echo ERROR > status.txt
-          set /p CODE=<status.txt
-          if "%CODE%"=="ERROR" (
-            echo Intento %I%/%ATTEMPTS%: aún no responde %URL%. Esperamos 5s...
-            timeout /t 5 /nobreak >nul
-            set /a I+=1
-            if %I% leq %ATTEMPTS% goto loop
-            echo El endpoint no respondió: %URL%
-            exit /b 1
-          ) else (
-            echo OK: respondió %URL% -> %CODE%
-          )
-        """
+        sh '''
+          set -euo pipefail
+          echo "Esperando 10s a que MI procese el .car..."
+          sleep 10
+          URL="http://${MI_HOST}:${MI_RUNTIME_PORT}${HEALTH_PATH}"
+          ATTEMPTS=12
+          I=1
+          while [ $I -le $ATTEMPTS ]; do
+            if [ "${MI_TLS_INSEGURO}" = "true" ]; then
+              out=$(curl -sS -o /dev/null -w "%{http_code}" -m 8 -k "$URL" 2>/dev/null || echo "000")
+            else
+              out=$(curl -sS -o /dev/null -w "%{http_code}" -m 8 "$URL" 2>/dev/null || echo "000")
+            fi
+            if [ "$out" != "000" ]; then
+              echo "OK: respondió $URL -> $out"
+              exit 0
+            fi
+            echo "Intento $I/$ATTEMPTS: aún no responde $URL"
+            I=$((I+1))
+            sleep 5
+          done
+          echo "El endpoint no respondió: $URL"
+          exit 1
+        '''
       }
     }
   }
